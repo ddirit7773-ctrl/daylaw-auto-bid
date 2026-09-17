@@ -33,6 +33,11 @@ def parse_args() -> argparse.Namespace:
         help="Stats window in complete days. Default: STATS_DAYS or 14",
     )
     parser.add_argument(
+        "--check",
+        action="store_true",
+        help="Only verify API credentials and target campaign/adgroup lookup.",
+    )
+    parser.add_argument(
         "--delete",
         action="store_true",
         help="Actually delete candidates after backup and revalidation.",
@@ -116,7 +121,10 @@ def main() -> int:
         print("DAYLAW NAVER KEYWORD CLEANER")
         print(f"Campaign        : {target_campaign_name}")
         print(f"Stats range     : {since} ~ {until} ({days} complete days)")
-        print(f"Mode            : {'LIVE DELETE' if args.delete else 'DRY RUN'}")
+        print(
+            f"Mode            : "
+            f"{'CHECK' if args.check else ('LIVE DELETE' if args.delete else 'DRY RUN')}"
+        )
         print(f"Protected suffix: {', '.join(protected_suffixes)}")
         print("=" * 72)
 
@@ -128,6 +136,12 @@ def main() -> int:
         print("[2/6] Ad groups loading...")
         adgroups = client.get_adgroups(campaign_id)
         print(f"      Ad groups: {len(adgroups):,}")
+
+        if args.check:
+            print("")
+            print("[CHECK OK] API credentials and target campaign lookup are working.")
+            print("Nothing was changed or deleted.")
+            return 0
 
         print("[3/6] Keywords loading...")
         collected: list[dict] = []
