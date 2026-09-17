@@ -10,7 +10,11 @@ from zoneinfo import ZoneInfo
 from dotenv import load_dotenv
 
 from .naver_api import NaverConfig, NaverSearchAdsClient, NaverSearchAdsError
-from .rules import DEFAULT_PROTECTED_SUFFIXES, classify_keyword
+from .rules import (
+    DEFAULT_PROTECTED_SUFFIXES,
+    classify_keyword,
+    is_protected_keyword,
+)
 from .storage import append_delete_log, write_scan_backups
 
 
@@ -30,12 +34,24 @@ def parse_args() -> argparse.Namespace:
         "--days",
         type=int,
         default=None,
-        help="Stats window in complete days. Default: STATS_DAYS or 14",
+        help="Recent activity window. Default: RECENT_DAYS or 21.",
+    )
+    parser.add_argument(
+        "--history-days",
+        type=int,
+        default=None,
+        help="Long activity history window. Default: HISTORY_DAYS or 90.",
+    )
+    parser.add_argument(
+        "--min-age-days",
+        type=int,
+        default=None,
+        help="Minimum keyword age before deletion can be considered. Default: 21.",
     )
     parser.add_argument(
         "--check",
         action="store_true",
-        help="Only verify API credentials and list matching campaigns/ad groups.",
+        help="Only verify API credentials and list campaigns/ad groups.",
     )
     parser.add_argument(
         "--delete",
@@ -70,7 +86,6 @@ def _select_campaigns(campaigns: list[dict], exact_name: str | None) -> list[dic
             raise NaverSearchAdsError(f'Campaign "{target}" not found.')
         return matched
 
-    # Default behavior: scan every campaign in the account, regardless of name.
     return sorted(
         campaigns,
         key=lambda c: (
@@ -82,24 +97,59 @@ def _select_campaigns(campaigns: list[dict], exact_name: str | None) -> list[dic
 
 def _stats_range(days: int) -> tuple[str, str]:
     if days < 1 or days > 90:
-        raise ValueError("--days must be between 1 and 90")
+        raise ValueError("stats days must be between 1 and 90")
     today = datetime.now(KST).date()
     until = today - timedelta(days=1)
     since = until - timedelta(days=days - 1)
     return since.isoformat(), until.isoformat()
 
 
+def _parse_reg_tm(value: object) -> datetime | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    if text.endswith("Z"):
+        text = text[:-1] + "+00:00"
+    try:
+        parsed = datetime.fromisoformat(text)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=KST)
+    return parsed.astimezone(KST)
+
+
+def _keyword_age_days(reg_tm: object) -> int | None:
+    registered = _parse_reg_tm(reg_tm)
+    if registered is None:
+        return None
+    age = (datetime.now(KST).date() - registered.date()).days
+    return max(age, 0)
+
+
 def main() -> int:
     load_dotenv()
     args = parse_args()
 
-    days = args.days or int(os.getenv("STATS_DAYS", "14"))
+    # RECENT_DAYS intentionally replaces the old STATS_DAYS setting so an older
+    # local .env containing STATS_DAYS=14 cannot accidentally weaken this rule.
+    recent_days = args.days or int(os.getenv("RECENT_DAYS", "21"))
+    history_days = args.history_days or int(os.getenv("HISTORY_DAYS", "90"))
+    min_age_days = args.min_age_days or int(
+        os.getenv("MIN_KEYWORD_AGE_DAYS", "21")
+    )
+    if history_days < recent_days:
+        raise ValueError("HISTORY_DAYS must be greater than or equal to RECENT_DAYS")
+    if min_age_days < 1:
+        raise ValueError("MIN_KEYWORD_AGE_DAYS must be at least 1")
+
     protected_suffixes = _split_env("PROTECTED_SUFFIXES") or list(
         DEFAULT_PROTECTED_SUFFIXES
     )
     extra_exact_keywords = _split_env("EXTRA_PROTECTED_KEYWORDS")
     backup_dir = os.getenv("BACKUP_DIR", "data/backups")
     delete_log_path = os.getenv("DELETE_LOG_PATH", "logs/deleted_keywords.csv")
+    batch_size = int(os.getenv("STATS_BATCH_SIZE", "100"))
 
     if args.delete and args.confirm_delete != "DELETE":
         print(
@@ -111,23 +161,32 @@ def main() -> int:
     try:
         config = NaverConfig.from_env()
         client = NaverSearchAdsClient(config)
-        since, until = _stats_range(days)
+        recent_since, until = _stats_range(recent_days)
+        history_since, history_until = _stats_range(history_days)
 
-        print("=" * 72)
+        print("=" * 76)
         print("DAYLAW NAVER KEYWORD CLEANER")
         print(
-            f"Campaign scope   : "
+            f"Campaign scope    : "
             f"{('EXACT: ' + args.campaign) if args.campaign else 'ALL CAMPAIGNS'}"
         )
-        print(f"Stats range      : {since} ~ {until} ({days} complete days)")
         print(
-            f"Mode             : "
+            f"Recent window     : {recent_since} ~ {until} "
+            f"({recent_days} complete days)"
+        )
+        print(
+            f"History guard     : {history_since} ~ {history_until} "
+            f"({history_days} complete days)"
+        )
+        print(f"Minimum age       : {min_age_days} days")
+        print(
+            f"Mode              : "
             f"{'CHECK' if args.check else ('LIVE DELETE' if args.delete else 'DRY RUN')}"
         )
-        print(f"Protected suffix : {', '.join(protected_suffixes)}")
-        print("=" * 72)
+        print(f"Protected suffix  : {', '.join(protected_suffixes)}")
+        print("=" * 76)
 
-        print("[1/6] Campaigns loading...")
+        print("[1/7] Campaigns loading...")
         campaigns = _select_campaigns(client.get_campaigns(), args.campaign)
         if not campaigns:
             print("[DONE] No campaigns found.")
@@ -140,7 +199,7 @@ def main() -> int:
                 f"({campaign.get('nccCampaignId')})"
             )
 
-        print("[2/6] Ad groups loading...")
+        print("[2/7] Ad groups loading...")
         campaign_groups: list[tuple[dict, list[dict]]] = []
         total_adgroups = 0
         for campaign in campaigns:
@@ -157,7 +216,7 @@ def main() -> int:
             print("Nothing was changed or deleted.")
             return 0
 
-        print("[3/6] Keywords loading...")
+        print("[3/7] Keywords loading...")
         collected: list[dict] = []
         raw_records: list[dict] = []
         processed_groups = 0
@@ -175,6 +234,7 @@ def main() -> int:
                     keyword_id = str(keyword.get("nccKeywordId", "")).strip()
                     if not keyword_id:
                         continue
+                    reg_tm = keyword.get("regTm")
                     collected.append(
                         {
                             "campaign_name": campaign_name,
@@ -185,6 +245,8 @@ def main() -> int:
                             "keyword_id": keyword_id,
                             "bid_amt": keyword.get("bidAmt"),
                             "use_group_bid_amt": keyword.get("useGroupBidAmt"),
+                            "reg_tm": reg_tm,
+                            "age_days": _keyword_age_days(reg_tm),
                             "raw": keyword,
                         }
                     )
@@ -211,39 +273,90 @@ def main() -> int:
             print("[DONE] No keywords found.")
             return 0
 
-        print("[4/6] Stats loading...")
         keyword_ids = [row["keyword_id"] for row in collected]
-        stats = client.get_keyword_stats(
+        print(f"[4/7] Recent {recent_days}-day stats loading...")
+        recent_stats = client.get_keyword_stats(
             keyword_ids,
-            since=since,
+            since=recent_since,
             until=until,
-            batch_size=int(os.getenv("STATS_BATCH_SIZE", "100")),
+            batch_size=batch_size,
         )
 
-        print("[5/6] Classifying and backing up...")
+        # Fetch the heavier 90-day history only for items that could otherwise
+        # become delete candidates. Core, young, unknown-age, or recently active
+        # keywords never need this second query.
+        history_candidate_ids: list[str] = []
+        for item in collected:
+            protected, _ = is_protected_keyword(
+                adgroup_name=item["adgroup_name"],
+                keyword=item["keyword"],
+                protected_suffixes=protected_suffixes,
+                extra_exact_keywords=extra_exact_keywords,
+            )
+            recent = recent_stats.get(
+                item["keyword_id"], {"impCnt": 0, "clkCnt": 0}
+            )
+            if protected:
+                continue
+            if item["age_days"] is None or item["age_days"] < min_age_days:
+                continue
+            if recent["impCnt"] > 0 or recent["clkCnt"] > 0:
+                continue
+            history_candidate_ids.append(item["keyword_id"])
+
+        print(
+            f"[5/7] {history_days}-day history guard loading for "
+            f"{len(history_candidate_ids):,} zero-activity eligible keywords..."
+        )
+        if history_candidate_ids:
+            history_stats = client.get_keyword_stats(
+                history_candidate_ids,
+                since=history_since,
+                until=history_until,
+                batch_size=batch_size,
+            )
+        else:
+            history_stats = {}
+
+        print("[6/7] Classifying and backing up...")
         output_rows: list[dict] = []
         candidates: list[dict] = []
 
         for item in collected:
-            stat = stats.get(item["keyword_id"], {"impCnt": 0, "clkCnt": 0})
+            recent = recent_stats.get(
+                item["keyword_id"], {"impCnt": 0, "clkCnt": 0}
+            )
+            history = history_stats.get(
+                item["keyword_id"], {"impCnt": 0, "clkCnt": 0}
+            )
             decision = classify_keyword(
                 adgroup_name=item["adgroup_name"],
                 keyword=item["keyword"],
-                impressions=stat["impCnt"],
-                clicks=stat["clkCnt"],
+                age_days=item["age_days"],
+                recent_impressions=recent["impCnt"],
+                recent_clicks=recent["clkCnt"],
+                history_impressions=history["impCnt"],
+                history_clicks=history["clkCnt"],
+                min_age_days=min_age_days,
+                recent_days=recent_days,
+                history_days=history_days,
                 protected_suffixes=protected_suffixes,
                 extra_exact_keywords=extra_exact_keywords,
             )
 
             row = {
                 **{key: value for key, value in item.items() if key != "raw"},
-                "impressions": stat["impCnt"],
-                "clicks": stat["clkCnt"],
+                "recent_impressions": recent["impCnt"],
+                "recent_clicks": recent["clkCnt"],
+                "history_impressions": history["impCnt"],
+                "history_clicks": history["clkCnt"],
                 "status": decision.status,
                 "reason": decision.reason,
                 "protected": decision.protected,
-                "stats_since": since,
-                "stats_until": until,
+                "recent_stats_since": recent_since,
+                "recent_stats_until": until,
+                "history_stats_since": history_since,
+                "history_stats_until": history_until,
             }
             output_rows.append(row)
             if decision.status == "DELETE_CANDIDATE":
@@ -257,23 +370,31 @@ def main() -> int:
         )
 
         counts = Counter(row["status"] for row in output_rows)
+        reason_counts = Counter(
+            str(row["reason"]).split(":", 1)[0] for row in output_rows
+        )
         print("")
         print("RESULT")
-        print(f"  CAMPAIGNS        : {len(campaigns):,}")
-        print(f"  AD GROUPS        : {total_adgroups:,}")
-        print(f"  KEYWORDS         : {len(output_rows):,}")
-        print(f"  KEEP             : {counts['KEEP']:,}")
-        print(f"  WATCH            : {counts['WATCH']:,}")
-        print(f"  DELETE_CANDIDATE : {counts['DELETE_CANDIDATE']:,}")
-        print(f"  CSV backup       : {csv_path}")
-        print(f"  JSON raw backup  : {json_path}")
+        print(f"  CAMPAIGNS         : {len(campaigns):,}")
+        print(f"  AD GROUPS         : {total_adgroups:,}")
+        print(f"  KEYWORDS          : {len(output_rows):,}")
+        print(f"  KEEP              : {counts['KEEP']:,}")
+        print(f"  WATCH             : {counts['WATCH']:,}")
+        print(f"  DELETE_CANDIDATE  : {counts['DELETE_CANDIDATE']:,}")
+        print(f"  CORE/WHITELIST    : {reason_counts['core'] + reason_counts['extra_whitelist']:,}")
+        print(f"  YOUNG < {min_age_days}d       : {reason_counts['young_keyword']:,}")
+        print(f"  AGE UNKNOWN       : {sum(1 for r in output_rows if r['reason'] == 'safety:registration_age_unknown'):,}")
+        print(f"  RECENT ACTIVITY   : {reason_counts['recent_activity']:,}")
+        print(f"  90D HISTORY GUARD : {reason_counts['historical_activity']:,}")
+        print(f"  CSV backup        : {csv_path}")
+        print(f"  JSON raw backup   : {json_path}")
 
         if not args.delete:
             print("")
             print("[SAFE STOP] Nothing was deleted. This was a dry run.")
             print(
-                "Review DELETE_CANDIDATE rows first. "
-                "Live deletion is disabled unless --delete is explicitly supplied."
+                "Delete candidates passed ALL guards: not core, old enough, "
+                "recent 0/0, and history 0/0."
             )
             return 0
 
@@ -286,13 +407,19 @@ def main() -> int:
             candidates = candidates[:max_delete]
             print(f"[SAFETY CAP] Live deletion limited to first {max_delete} candidates.")
 
-        print("[6/6] Revalidating candidates immediately before deletion...")
+        print("[7/7] Revalidating candidates immediately before deletion...")
         recheck_ids = [row["keyword_id"] for row in candidates]
-        recheck = client.get_keyword_stats(
+        recent_recheck = client.get_keyword_stats(
             recheck_ids,
-            since=since,
+            since=recent_since,
             until=until,
-            batch_size=int(os.getenv("STATS_BATCH_SIZE", "100")),
+            batch_size=batch_size,
+        )
+        history_recheck = client.get_keyword_stats(
+            recheck_ids,
+            since=history_since,
+            until=history_until,
+            batch_size=batch_size,
         )
 
         deleted = 0
@@ -300,7 +427,28 @@ def main() -> int:
         failed = 0
 
         for index, row in enumerate(candidates, start=1):
-            latest = recheck.get(row["keyword_id"], {"impCnt": 0, "clkCnt": 0})
+            recent = recent_recheck.get(
+                row["keyword_id"], {"impCnt": 0, "clkCnt": 0}
+            )
+            history = history_recheck.get(
+                row["keyword_id"], {"impCnt": 0, "clkCnt": 0}
+            )
+            current_age = _keyword_age_days(row.get("reg_tm"))
+            decision = classify_keyword(
+                adgroup_name=row["adgroup_name"],
+                keyword=row["keyword"],
+                age_days=current_age,
+                recent_impressions=recent["impCnt"],
+                recent_clicks=recent["clkCnt"],
+                history_impressions=history["impCnt"],
+                history_clicks=history["clkCnt"],
+                min_age_days=min_age_days,
+                recent_days=recent_days,
+                history_days=history_days,
+                protected_suffixes=protected_suffixes,
+                extra_exact_keywords=extra_exact_keywords,
+            )
+
             now = datetime.now(KST).isoformat(timespec="seconds")
             base_log = {
                 "deleted_at": now,
@@ -310,18 +458,13 @@ def main() -> int:
                 "adgroup_id": row["adgroup_id"],
                 "keyword": row["keyword"],
                 "keyword_id": row["keyword_id"],
-                "impressions": latest["impCnt"],
-                "clicks": latest["clkCnt"],
+                "reg_tm": row.get("reg_tm"),
+                "age_days": current_age,
+                "recent_impressions": recent["impCnt"],
+                "recent_clicks": recent["clkCnt"],
+                "history_impressions": history["impCnt"],
+                "history_clicks": history["clkCnt"],
             }
-
-            decision = classify_keyword(
-                adgroup_name=row["adgroup_name"],
-                keyword=row["keyword"],
-                impressions=latest["impCnt"],
-                clicks=latest["clkCnt"],
-                protected_suffixes=protected_suffixes,
-                extra_exact_keywords=extra_exact_keywords,
-            )
 
             if decision.status != "DELETE_CANDIDATE":
                 skipped += 1
@@ -342,7 +485,7 @@ def main() -> int:
                     {
                         **base_log,
                         "result": "DELETED",
-                        "message": "backup_created_before_delete",
+                        "message": "backup_created_and_all_guards_revalidated",
                     },
                     log_path=delete_log_path,
                 )
