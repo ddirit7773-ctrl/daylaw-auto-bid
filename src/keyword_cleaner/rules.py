@@ -12,6 +12,9 @@ DEFAULT_PROTECTED_SUFFIXES = (
     "피해금",
     "팀미션",
     "부업",
+    "쇼핑몰",
+    "구매대행",
+    "리뷰",
 )
 
 
@@ -43,7 +46,13 @@ def is_protected_keyword(
     if kw == group:
         return True, "core:adgroup_name"
 
-    for suffix in protected_suffixes:
+    # Built-in protected suffixes are always enforced. Values passed from .env
+    # can only add protection; an old local .env cannot accidentally remove
+    # newly-added permanent core variants.
+    effective_suffixes = tuple(
+        dict.fromkeys((*DEFAULT_PROTECTED_SUFFIXES, *tuple(protected_suffixes)))
+    )
+    for suffix in effective_suffixes:
         protected = group + normalize(suffix)
         if kw == protected:
             return True, f"core:{suffix}"
@@ -108,9 +117,7 @@ def classify_keyword(
 
     if recent_impressions > 0:
         return Decision(
-            "WATCH",
-            f"recent_activity:{recent_days}d_impressions={recent_impressions},clicks=0",
-            False,
+            "WATCH", f"recent_activity:{recent_days}d_impressions={recent_impressions},clicks=0", False
         )
 
     if history_clicks > 0 or history_impressions > 0:
