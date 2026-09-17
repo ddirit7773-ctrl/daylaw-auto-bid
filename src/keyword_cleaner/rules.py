@@ -59,11 +59,27 @@ def classify_keyword(
     *,
     adgroup_name: str,
     keyword: str,
-    impressions: int,
-    clicks: int,
+    age_days: int | None,
+    recent_impressions: int,
+    recent_clicks: int,
+    history_impressions: int,
+    history_clicks: int,
+    min_age_days: int,
+    recent_days: int,
+    history_days: int,
     protected_suffixes: Iterable[str] = DEFAULT_PROTECTED_SUFFIXES,
     extra_exact_keywords: Iterable[str] = (),
 ) -> Decision:
+    """Classify one keyword conservatively.
+
+    Deletion is allowed only when ALL of these are true:
+    - not a protected/core keyword
+    - registration age is known and >= min_age_days
+    - no impressions/clicks in the recent window
+    - no impressions/clicks in the longer history window
+
+    This deliberately prefers WATCH/KEEP when information is uncertain.
+    """
     protected, reason = is_protected_keyword(
         adgroup_name=adgroup_name,
         keyword=keyword,
@@ -73,14 +89,45 @@ def classify_keyword(
     if protected:
         return Decision("KEEP", reason, True)
 
-    if clicks > 0:
-        return Decision("KEEP", f"activity:clicks={clicks}", False)
+    if age_days is None:
+        return Decision("WATCH", "safety:registration_age_unknown", False)
 
-    if impressions > 0:
+    if age_days < min_age_days:
         return Decision(
-            "WATCH", f"activity:impressions={impressions},clicks=0", False
+            "KEEP",
+            f"young_keyword:age={age_days}d<min={min_age_days}d",
+            False,
+        )
+
+    if recent_clicks > 0:
+        return Decision(
+            "KEEP",
+            f"recent_activity:{recent_days}d_clicks={recent_clicks}",
+            False,
+        )
+
+    if recent_impressions > 0:
+        return Decision(
+            "WATCH",
+            f"recent_activity:{recent_days}d_impressions={recent_impressions},clicks=0",
+            False,
+        )
+
+    if history_clicks > 0 or history_impressions > 0:
+        return Decision(
+            "WATCH",
+            (
+                f"historical_activity:{history_days}d_impressions="
+                f"{history_impressions},clicks={history_clicks}"
+            ),
+            False,
         )
 
     return Decision(
-        "DELETE_CANDIDATE", "14d_zero_impressions_and_clicks", False
+        "DELETE_CANDIDATE",
+        (
+            f"safe_zero_activity:age={age_days}d,recent={recent_days}d_0/0,"
+            f"history={history_days}d_0/0"
+        ),
+        False,
     )
