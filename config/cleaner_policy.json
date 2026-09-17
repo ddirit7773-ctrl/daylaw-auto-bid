@@ -1,0 +1,81 @@
+{
+  "schema_version": 2,
+  "permanent_suffixes": [
+    "",
+    "사기",
+    "피해",
+    "피해금"
+  ],
+  "type_core_suffixes": [
+    "사칭",
+    "신고",
+    "고소",
+    "주식",
+    "코인",
+    "리딩방",
+    "주식리딩방",
+    "코인리딩방",
+    "해외선물",
+    "선물",
+    "투자",
+    "AI투자",
+    "AI자동매매",
+    "자동매매",
+    "가상자산",
+    "가상자산거래소",
+    "가상화폐",
+    "플랫폼",
+    "지수거래",
+    "HTS",
+    "MTS",
+    "쇼핑몰",
+    "부업",
+    "팀미션",
+    "미션",
+    "구매대행",
+    "리뷰",
+    "여행사",
+    "여행",
+    "영화예매",
+    "영화",
+    "예매",
+    "기프트카드",
+    "상품권",
+    "로또",
+    "코인보상",
+    "피해보상",
+    "보상",
+    "보험금",
+    "보험금환급",
+    "환급",
+    "결혼정보회사",
+    "로맨스스캠"
+  ],
+  "protection_days": {
+    "general": 21,
+    "type_core": 30
+  },
+  "inactivity_days": {
+    "general": 30,
+    "type_core": 45
+  },
+  "click_protection_days": 60,
+  "reference_history_days": 90,
+  "pending_recheck_days": 7,
+  "account_capacity": {
+    "cleanup_start": 90000,
+    "cleanup_stop": 82000,
+    "hard_limit_reference": 100000
+  },
+  "deletion_batches": {
+    "first_test": 20,
+    "second_test": 200,
+    "normal": 500
+  },
+  "safety": {
+    "require_exposure_eligible": true,
+    "require_complete_stats": true,
+    "require_second_confirmation": true,
+    "monthly_search_volume_is_delete_gate": false
+  }
+}
