@@ -1,18 +1,18 @@
 from __future__ import annotations
 
+import os
 import re
 import unicodedata
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Iterable
 
 
 # Permanent core variants. These are matched only as an exact
 # "ad-group name + suffix" combination after normalization.
 #
-# The list intentionally covers every scam-template family currently used by
-# the ad-group generator. It does NOT keep an arbitrary keyword merely because
-# it contains one of these words somewhere; e.g. for ad group "ABC", only
-# "ABC해외선물" is protected by the "해외선물" suffix.
+# Example: for ad group "ABC", suffix "해외선물" protects only
+# "ABC해외선물" (including harmless spacing/punctuation differences).
 DEFAULT_PROTECTED_SUFFIXES = (
     # Common fraud / response intent
     "사기",
@@ -77,6 +77,37 @@ def normalize(text: str) -> str:
     return re.sub(r"[\s\-_./·ㆍ()\[\]{}]+", "", text)
 
 
+def _read_user_list(filename: str) -> list[str]:
+    """Load editable protection entries from config/*.txt.
+
+    Blank lines and lines beginning with # are ignored. Missing files are safe.
+    The directory can be changed with PROTECTION_CONFIG_DIR.
+    """
+    config_dir = Path(os.getenv("PROTECTION_CONFIG_DIR", "config"))
+    path = config_dir / filename
+    if not path.exists():
+        return []
+
+    values: list[str] = []
+    with path.open("r", encoding="utf-8-sig") as fp:
+        for raw in fp:
+            value = raw.strip()
+            if not value or value.startswith("#"):
+                continue
+            values.append(value)
+    return values
+
+
+def user_protected_suffixes() -> list[str]:
+    """Suffixes automatically combined with every ad-group name."""
+    return _read_user_list("protected_suffixes.txt")
+
+
+def user_exact_protected_keywords() -> list[str]:
+    """Full exact keywords that must always be kept."""
+    return _read_user_list("protected_keywords.txt")
+
+
 @dataclass(frozen=True)
 class Decision:
     status: str
@@ -100,18 +131,35 @@ def is_protected_keyword(
     if kw == group:
         return True, "core:adgroup_name"
 
-    # Built-in protected suffixes are always enforced. Values passed from .env
-    # can only add protection; an old local .env cannot accidentally remove
-    # newly-added permanent core variants.
+    # Three layers are merged:
+    # 1) built-ins in code
+    # 2) optional .env additions
+    # 3) editable config/protected_suffixes.txt additions
+    # None of the user layers can remove built-in protection.
     effective_suffixes = tuple(
-        dict.fromkeys((*DEFAULT_PROTECTED_SUFFIXES, *tuple(protected_suffixes)))
+        dict.fromkeys(
+            (
+                *DEFAULT_PROTECTED_SUFFIXES,
+                *tuple(protected_suffixes),
+                *tuple(user_protected_suffixes()),
+            )
+        )
     )
     for suffix in effective_suffixes:
         protected = group + normalize(suffix)
         if kw == protected:
             return True, f"core:{suffix}"
 
-    extra = {normalize(value) for value in extra_exact_keywords if value.strip()}
+    # Exact whitelist can also be managed in two places:
+    # .env EXTRA_PROTECTED_KEYWORDS and config/protected_keywords.txt.
+    extra = {
+        normalize(value)
+        for value in (
+            *tuple(extra_exact_keywords),
+            *tuple(user_exact_protected_keywords()),
+        )
+        if value.strip()
+    }
     if kw in extra:
         return True, "extra_whitelist"
 
