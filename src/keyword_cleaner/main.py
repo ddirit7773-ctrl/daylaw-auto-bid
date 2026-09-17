@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import argparse
 import os
-import re
 import sys
 from collections import Counter
 from datetime import datetime, timedelta
@@ -25,10 +24,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--campaign",
         default=None,
-        help=(
-            "Base campaign name. Example: 서원데이 matches 서원데이, 서원데이1, "
-            "서원데이2 ... Default: TARGET_CAMPAIGN_NAME or 서원데이"
-        ),
+        help="Optional exact campaign name filter. If omitted, ALL campaigns are scanned.",
     )
     parser.add_argument(
         "--days",
@@ -39,7 +35,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--check",
         action="store_true",
-        help="Only verify API credentials and target campaign/adgroup lookup.",
+        help="Only verify API credentials and list matching campaigns/ad groups.",
     )
     parser.add_argument(
         "--delete",
@@ -64,34 +60,24 @@ def _split_env(name: str) -> list[str]:
     return [part.strip() for part in os.getenv(name, "").split(",") if part.strip()]
 
 
-def _campaign_sort_key(campaign: dict, base_name: str) -> tuple[int, str]:
-    name = str(campaign.get("name", "")).strip()
-    if name == base_name:
-        return (0, name)
-    suffix = name[len(base_name):]
-    return (int(suffix) + 1 if suffix.isdigit() else 10**9, name)
+def _select_campaigns(campaigns: list[dict], exact_name: str | None) -> list[dict]:
+    if exact_name:
+        target = exact_name.strip()
+        matched = [
+            c for c in campaigns if str(c.get("name", "")).strip() == target
+        ]
+        if not matched:
+            raise NaverSearchAdsError(f'Campaign "{target}" not found.')
+        return matched
 
-
-def _find_campaigns(campaigns: list[dict], base_name: str) -> list[dict]:
-    # Only match the exact base name or the same name followed by digits.
-    # This avoids accidentally including names such as "서원데이테스트".
-    pattern = re.compile(rf"^{re.escape(base_name)}(?:\d+)?$")
-    matched = [
-        c
-        for c in campaigns
-        if pattern.fullmatch(str(c.get("name", "")).strip())
-    ]
-    if not matched:
-        similar = [
-            str(c.get("name", ""))
-            for c in campaigns
-            if base_name.casefold() in str(c.get("name", "")).casefold()
-        ][:10]
-        hint = f" Similar names: {similar}" if similar else ""
-        raise NaverSearchAdsError(
-            f'Campaign family "{base_name}" not found.{hint}'
-        )
-    return sorted(matched, key=lambda c: _campaign_sort_key(c, base_name))
+    # Default behavior: scan every campaign in the account, regardless of name.
+    return sorted(
+        campaigns,
+        key=lambda c: (
+            str(c.get("name", "")).casefold(),
+            str(c.get("nccCampaignId", "")),
+        ),
+    )
 
 
 def _stats_range(days: int) -> tuple[str, str]:
@@ -107,11 +93,6 @@ def main() -> int:
     load_dotenv()
     args = parse_args()
 
-    target_campaign_base = (
-        args.campaign
-        or os.getenv("TARGET_CAMPAIGN_NAME", "").strip()
-        or "서원데이"
-    )
     days = args.days or int(os.getenv("STATS_DAYS", "14"))
     protected_suffixes = _split_env("PROTECTED_SUFFIXES") or list(
         DEFAULT_PROTECTED_SUFFIXES
@@ -134,7 +115,10 @@ def main() -> int:
 
         print("=" * 72)
         print("DAYLAW NAVER KEYWORD CLEANER")
-        print(f"Campaign family  : {target_campaign_base}, {target_campaign_base}1, {target_campaign_base}2 ...")
+        print(
+            f"Campaign scope   : "
+            f"{('EXACT: ' + args.campaign) if args.campaign else 'ALL CAMPAIGNS'}"
+        )
         print(f"Stats range      : {since} ~ {until} ({days} complete days)")
         print(
             f"Mode             : "
@@ -144,8 +128,12 @@ def main() -> int:
         print("=" * 72)
 
         print("[1/6] Campaigns loading...")
-        campaigns = _find_campaigns(client.get_campaigns(), target_campaign_base)
-        print(f"      Matched campaigns: {len(campaigns)}")
+        campaigns = _select_campaigns(client.get_campaigns(), args.campaign)
+        if not campaigns:
+            print("[DONE] No campaigns found.")
+            return 0
+
+        print(f"      Matched campaigns: {len(campaigns):,}")
         for campaign in campaigns:
             print(
                 f"      - {campaign.get('name')} "
@@ -165,7 +153,7 @@ def main() -> int:
 
         if args.check:
             print("")
-            print("[CHECK OK] API credentials and campaign-family lookup are working.")
+            print("[CHECK OK] API credentials and all-campaign lookup are working.")
             print("Nothing was changed or deleted.")
             return 0
 
