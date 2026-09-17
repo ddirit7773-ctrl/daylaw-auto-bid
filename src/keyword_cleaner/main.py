@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import re
 import sys
 from collections import Counter
 from datetime import datetime, timedelta
@@ -24,7 +25,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--campaign",
         default=None,
-        help="Exact campaign name. Default: TARGET_CAMPAIGN_NAME or 서원데이",
+        help=(
+            "Base campaign name. Example: 서원데이 matches 서원데이, 서원데이1, "
+            "서원데이2 ... Default: TARGET_CAMPAIGN_NAME or 서원데이"
+        ),
     )
     parser.add_argument(
         "--days",
@@ -60,23 +64,34 @@ def _split_env(name: str) -> list[str]:
     return [part.strip() for part in os.getenv(name, "").split(",") if part.strip()]
 
 
-def _find_campaign(campaigns: list[dict], target_name: str) -> dict:
-    exact = [c for c in campaigns if str(c.get("name", "")).strip() == target_name]
-    if len(exact) == 1:
-        return exact[0]
-    if len(exact) > 1:
-        ids = ", ".join(str(c.get("nccCampaignId")) for c in exact)
-        raise NaverSearchAdsError(
-            f'Campaign name "{target_name}" is duplicated. IDs: {ids}'
-        )
+def _campaign_sort_key(campaign: dict, base_name: str) -> tuple[int, str]:
+    name = str(campaign.get("name", "")).strip()
+    if name == base_name:
+        return (0, name)
+    suffix = name[len(base_name):]
+    return (int(suffix) + 1 if suffix.isdigit() else 10**9, name)
 
-    partial = [
-        str(c.get("name", ""))
+
+def _find_campaigns(campaigns: list[dict], base_name: str) -> list[dict]:
+    # Only match the exact base name or the same name followed by digits.
+    # This avoids accidentally including names such as "서원데이테스트".
+    pattern = re.compile(rf"^{re.escape(base_name)}(?:\d+)?$")
+    matched = [
+        c
         for c in campaigns
-        if target_name.casefold() in str(c.get("name", "")).casefold()
-    ][:10]
-    hint = f" Similar names: {partial}" if partial else ""
-    raise NaverSearchAdsError(f'Campaign "{target_name}" not found.{hint}')
+        if pattern.fullmatch(str(c.get("name", "")).strip())
+    ]
+    if not matched:
+        similar = [
+            str(c.get("name", ""))
+            for c in campaigns
+            if base_name.casefold() in str(c.get("name", "")).casefold()
+        ][:10]
+        hint = f" Similar names: {similar}" if similar else ""
+        raise NaverSearchAdsError(
+            f'Campaign family "{base_name}" not found.{hint}'
+        )
+    return sorted(matched, key=lambda c: _campaign_sort_key(c, base_name))
 
 
 def _stats_range(days: int) -> tuple[str, str]:
@@ -92,7 +107,7 @@ def main() -> int:
     load_dotenv()
     args = parse_args()
 
-    target_campaign_name = (
+    target_campaign_base = (
         args.campaign
         or os.getenv("TARGET_CAMPAIGN_NAME", "").strip()
         or "서원데이"
@@ -119,69 +134,89 @@ def main() -> int:
 
         print("=" * 72)
         print("DAYLAW NAVER KEYWORD CLEANER")
-        print(f"Campaign        : {target_campaign_name}")
-        print(f"Stats range     : {since} ~ {until} ({days} complete days)")
+        print(f"Campaign family  : {target_campaign_base}, {target_campaign_base}1, {target_campaign_base}2 ...")
+        print(f"Stats range      : {since} ~ {until} ({days} complete days)")
         print(
-            f"Mode            : "
+            f"Mode             : "
             f"{'CHECK' if args.check else ('LIVE DELETE' if args.delete else 'DRY RUN')}"
         )
-        print(f"Protected suffix: {', '.join(protected_suffixes)}")
+        print(f"Protected suffix : {', '.join(protected_suffixes)}")
         print("=" * 72)
 
         print("[1/6] Campaigns loading...")
-        campaign = _find_campaign(client.get_campaigns(), target_campaign_name)
-        campaign_id = str(campaign["nccCampaignId"])
-        print(f"      Found: {campaign.get('name')} ({campaign_id})")
+        campaigns = _find_campaigns(client.get_campaigns(), target_campaign_base)
+        print(f"      Matched campaigns: {len(campaigns)}")
+        for campaign in campaigns:
+            print(
+                f"      - {campaign.get('name')} "
+                f"({campaign.get('nccCampaignId')})"
+            )
 
         print("[2/6] Ad groups loading...")
-        adgroups = client.get_adgroups(campaign_id)
-        print(f"      Ad groups: {len(adgroups):,}")
+        campaign_groups: list[tuple[dict, list[dict]]] = []
+        total_adgroups = 0
+        for campaign in campaigns:
+            campaign_id = str(campaign["nccCampaignId"])
+            adgroups = client.get_adgroups(campaign_id)
+            campaign_groups.append((campaign, adgroups))
+            total_adgroups += len(adgroups)
+            print(f"      {campaign.get('name')}: {len(adgroups):,} groups")
+        print(f"      Total ad groups: {total_adgroups:,}")
 
         if args.check:
             print("")
-            print("[CHECK OK] API credentials and target campaign lookup are working.")
+            print("[CHECK OK] API credentials and campaign-family lookup are working.")
             print("Nothing was changed or deleted.")
             return 0
 
         print("[3/6] Keywords loading...")
         collected: list[dict] = []
         raw_records: list[dict] = []
+        processed_groups = 0
 
-        for index, adgroup in enumerate(adgroups, start=1):
-            adgroup_id = str(adgroup["nccAdgroupId"])
-            adgroup_name = str(adgroup.get("name", ""))
-            keywords = client.get_keywords(adgroup_id)
+        for campaign, adgroups in campaign_groups:
+            campaign_name = str(campaign.get("name", ""))
+            campaign_id = str(campaign["nccCampaignId"])
+            for adgroup in adgroups:
+                processed_groups += 1
+                adgroup_id = str(adgroup["nccAdgroupId"])
+                adgroup_name = str(adgroup.get("name", ""))
+                keywords = client.get_keywords(adgroup_id)
 
-            for keyword in keywords:
-                keyword_id = str(keyword.get("nccKeywordId", "")).strip()
-                if not keyword_id:
-                    continue
-                collected.append(
-                    {
-                        "campaign_name": target_campaign_name,
-                        "campaign_id": campaign_id,
-                        "adgroup_name": adgroup_name,
-                        "adgroup_id": adgroup_id,
-                        "keyword": str(keyword.get("keyword", "")),
-                        "keyword_id": keyword_id,
-                        "bid_amt": keyword.get("bidAmt"),
-                        "use_group_bid_amt": keyword.get("useGroupBidAmt"),
-                        "raw": keyword,
-                    }
-                )
-                raw_records.append(
-                    {
-                        "campaign": campaign,
-                        "adgroup": adgroup,
-                        "keyword": keyword,
-                    }
-                )
+                for keyword in keywords:
+                    keyword_id = str(keyword.get("nccKeywordId", "")).strip()
+                    if not keyword_id:
+                        continue
+                    collected.append(
+                        {
+                            "campaign_name": campaign_name,
+                            "campaign_id": campaign_id,
+                            "adgroup_name": adgroup_name,
+                            "adgroup_id": adgroup_id,
+                            "keyword": str(keyword.get("keyword", "")),
+                            "keyword_id": keyword_id,
+                            "bid_amt": keyword.get("bidAmt"),
+                            "use_group_bid_amt": keyword.get("useGroupBidAmt"),
+                            "raw": keyword,
+                        }
+                    )
+                    raw_records.append(
+                        {
+                            "campaign": campaign,
+                            "adgroup": adgroup,
+                            "keyword": keyword,
+                        }
+                    )
 
-            if index == 1 or index % 25 == 0 or index == len(adgroups):
-                print(
-                    f"      {index:,}/{len(adgroups):,} groups, "
-                    f"{len(collected):,} keywords"
-                )
+                if (
+                    processed_groups == 1
+                    or processed_groups % 25 == 0
+                    or processed_groups == total_adgroups
+                ):
+                    print(
+                        f"      {processed_groups:,}/{total_adgroups:,} groups, "
+                        f"{len(collected):,} keywords"
+                    )
 
         print(f"      Total keywords: {len(collected):,}")
         if not collected:
@@ -236,6 +271,9 @@ def main() -> int:
         counts = Counter(row["status"] for row in output_rows)
         print("")
         print("RESULT")
+        print(f"  CAMPAIGNS        : {len(campaigns):,}")
+        print(f"  AD GROUPS        : {total_adgroups:,}")
+        print(f"  KEYWORDS         : {len(output_rows):,}")
         print(f"  KEEP             : {counts['KEEP']:,}")
         print(f"  WATCH            : {counts['WATCH']:,}")
         print(f"  DELETE_CANDIDATE : {counts['DELETE_CANDIDATE']:,}")
