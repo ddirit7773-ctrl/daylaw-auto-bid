@@ -34,6 +34,9 @@ DEFAULT_RESERVE_TOKENS = (
     "재택",
     "팀미션",
     "미션",
+    "쇼핑몰",
+    "구매대행",
+    "리뷰",
     "먹튀",
     "후기",
     "신고",
@@ -70,7 +73,9 @@ def reserve_tokens() -> tuple[str, ...]:
     raw = os.getenv("RESERVE_TOKENS", "").strip()
     if not raw:
         return DEFAULT_RESERVE_TOKENS
-    return tuple(part.strip() for part in raw.split(",") if part.strip())
+    # Built-ins are always retained; .env values only add reserve concepts.
+    extras = tuple(part.strip() for part in raw.split(",") if part.strip())
+    return tuple(dict.fromkeys((*DEFAULT_RESERVE_TOKENS, *extras)))
 
 
 def reserve_score(row: dict[str, str], tokens: tuple[str, ...]) -> tuple[int, int, str]:
@@ -81,7 +86,6 @@ def reserve_score(row: dict[str, str], tokens: tuple[str, ...]) -> tuple[int, in
     """
     keyword = normalize(row.get("keyword", ""))
     token_hits = sum(1 for token in tokens if normalize(token) and normalize(token) in keyword)
-    # Shorter phrases are generally broader/more reusable, so give them higher reserve value.
     shortness = max(0, 40 - len(keyword))
     return (token_hits * 100 + shortness, -len(keyword), keyword)
 
@@ -123,7 +127,6 @@ def main() -> int:
         by_floor = max(0, total - min_survivors)
         allowed_delete = min(len(candidates), by_ratio, by_floor)
 
-        # Reserve the most semantically useful zero-activity candidates first.
         reserve_count = len(candidates) - allowed_delete
         ranked_for_hold = sorted(candidates, key=lambda r: reserve_score(r, tokens), reverse=True)
         held_ids = {
