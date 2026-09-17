@@ -6,15 +6,69 @@ from dataclasses import dataclass
 from typing import Iterable
 
 
+# Permanent core variants. These are matched only as an exact
+# "ad-group name + suffix" combination after normalization.
+#
+# The list intentionally covers every scam-template family currently used by
+# the ad-group generator. It does NOT keep an arbitrary keyword merely because
+# it contains one of these words somewhere; e.g. for ad group "ABC", only
+# "ABC해외선물" is protected by the "해외선물" suffix.
 DEFAULT_PROTECTED_SUFFIXES = (
+    # Common fraud / response intent
     "사기",
     "피해",
     "피해금",
-    "팀미션",
-    "부업",
+    "사칭",
+    "신고",
+    "고소",
+
+    # Stock / coin / futures / investment
+    "주식",
+    "코인",
+    "리딩방",
+    "주식리딩방",
+    "코인리딩방",
+    "해외선물",
+    "선물",
+    "투자",
+    "AI투자",
+    "AI자동매매",
+    "자동매매",
+    "가상자산",
+    "가상자산거래소",
+    "가상화폐",
+    "플랫폼",
+    "지수거래",
+    "HTS",
+    "MTS",
+
+    # Shopping / travel / movie / gift-card team mission
     "쇼핑몰",
+    "부업",
+    "팀미션",
+    "미션",
     "구매대행",
     "리뷰",
+    "여행사",
+    "여행",
+    "영화예매",
+    "영화",
+    "예매",
+    "기프트카드",
+    "상품권",
+
+    # Lotto / compensation / refund
+    "로또",
+    "코인보상",
+    "피해보상",
+    "보상",
+    "보험금",
+    "보험금환급",
+    "환급",
+
+    # Romance scam
+    "결혼정보회사",
+    "로맨스스캠",
 )
 
 
@@ -117,7 +171,9 @@ def classify_keyword(
 
     if recent_impressions > 0:
         return Decision(
-            "WATCH", f"recent_activity:{recent_days}d_impressions={recent_impressions},clicks=0", False
+            "WATCH",
+            f"recent_activity:{recent_days}d_impressions={recent_impressions},clicks=0",
+            False,
         )
 
     if history_clicks > 0 or history_impressions > 0:
