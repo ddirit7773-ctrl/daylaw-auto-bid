@@ -24,7 +24,7 @@ jobs:
       - name: Compile check
         shell: pwsh
         run: |
-          python -m py_compile daylaw_app.py desktop_app.py desktop_app_v2.py desktop_app_v3.py desktop_app_v4.py restore_deleted_keyword.py query_account_stats.py execute_v2_delete.py
+          python -m py_compile daylaw_app.py desktop_app.py desktop_app_v2.py desktop_app_v3.py desktop_app_v4.py restore_deleted_keyword.py query_account_stats.py execute_v2_delete.py src/keyword_cleaner/naver_api.py
 
       - name: Build portable app
         shell: pwsh
@@ -34,8 +34,21 @@ jobs:
       - name: Smoke test packaged executable
         shell: pwsh
         run: |
-          & "dist/DAYLAW Keyword Cleaner/DAYLAW Keyword Cleaner.exe" --self-test
+          $root = "dist/DAYLAW Keyword Cleaner"
+          $exe = "$root/DAYLAW Keyword Cleaner.exe"
+          & $exe --self-test
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+          @"
+          NAVER_API_KEY=dummy_access_license
+          NAVER_SECRET_KEY=dummy_secret
+          NAVER_CUSTOMER_ID=123456
+          "@ | Set-Content -Path "$root/.env" -Encoding utf8
+
+          & $exe --env-self-test
+          $envExit = $LASTEXITCODE
+          Remove-Item "$root/.env" -Force
+          if ($envExit -ne 0) { exit $envExit }
 
       - name: Add editable config, writable folders, and env template
         shell: pwsh
