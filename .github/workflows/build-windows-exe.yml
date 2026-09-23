@@ -31,10 +31,12 @@ jobs:
         run: |
           pyinstaller --noconfirm DAYLAWKeywordCleaner.spec
 
-      - name: Add writable folders and env template
+      - name: Add editable config, writable folders, and env template
         shell: pwsh
         run: |
           $root = "dist/DAYLAW Keyword Cleaner"
+          New-Item -ItemType Directory -Force -Path "$root/config" | Out-Null
+          Copy-Item "config/*" "$root/config/" -Recurse -Force
           New-Item -ItemType Directory -Force -Path "$root/data/backups" | Out-Null
           New-Item -ItemType Directory -Force -Path "$root/data/stats" | Out-Null
           New-Item -ItemType Directory -Force -Path "$root/data/state" | Out-Null
