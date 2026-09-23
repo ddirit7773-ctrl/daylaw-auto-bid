@@ -8,6 +8,7 @@ import os
 import sys
 import time
 from dataclasses import dataclass
+from email.utils import parsedate_to_datetime
 from pathlib import Path
 from typing import Any, Iterable, Mapping, Sequence
 
@@ -95,6 +96,10 @@ class NaverSearchAdsClient:
         self.min_interval_seconds = min_interval_seconds
         self.session = requests.Session()
         self._last_request_at = 0.0
+        # Some Windows machines can have a small system-clock skew. Naver rejects
+        # signed requests whose timestamp falls outside its acceptance window.
+        # When that happens we learn the offset from the HTTP Date header and retry.
+        self._clock_offset_ms = 0.0
 
     @staticmethod
     def _signature(timestamp: str, method: str, uri: str, secret_key: str) -> str:
@@ -107,7 +112,7 @@ class NaverSearchAdsClient:
         return base64.b64encode(digest).decode("utf-8")
 
     def _headers(self, method: str, uri: str) -> dict[str, str]:
-        timestamp = str(int(time.time() * 1000))
+        timestamp = str(int(time.time() * 1000 + self._clock_offset_ms))
         return {
             "X-Timestamp": timestamp,
             "X-API-KEY": self.config.api_key,
@@ -117,6 +122,35 @@ class NaverSearchAdsClient:
             ),
             "Content-Type": "application/json; charset=UTF-8",
         }
+
+    @staticmethod
+    def _is_timestamp_error(response: requests.Response) -> bool:
+        if response.status_code != 403:
+            return False
+        text = response.text.lower()
+        return (
+            "invalid timestamp" in text
+            or "request has expired" in text
+            or "invalidtimestamp" in text
+        )
+
+    def _sync_clock_from_response(self, response: requests.Response) -> bool:
+        """Adjust request timestamps to the API server's HTTP Date header."""
+        date_header = response.headers.get("Date", "").strip()
+        if not date_header:
+            return False
+        try:
+            server_dt = parsedate_to_datetime(date_header)
+            if server_dt.tzinfo is None:
+                return False
+            # HTTP Date only has one-second precision. Aim near the middle of that
+            # second to avoid sitting exactly on the previous-second boundary.
+            server_ms = server_dt.timestamp() * 1000 + 500
+            local_ms = time.time() * 1000
+            self._clock_offset_ms = server_ms - local_ms
+            return True
+        except Exception:
+            return False
 
     def _request(
         self,
@@ -151,6 +185,18 @@ class NaverSearchAdsClient:
                     error = NaverSearchAdsError(
                         f"{method} {uri} failed ({response.status_code}): {detail}"
                     )
+
+                    if self._is_timestamp_error(response):
+                        last_error = error
+                        if attempt < self.max_retries - 1 and self._sync_clock_from_response(response):
+                            time.sleep(0.05)
+                            continue
+                        raise NaverSearchAdsError(
+                            str(error)
+                            + " | Windows 시간 동기화가 필요할 수 있습니다. "
+                            + "설정 > 시간 및 언어 > 날짜 및 시간 > 지금 동기화를 실행해주세요."
+                        ) from error
+
                     if response.status_code in {429, 500, 502, 503, 504}:
                         last_error = error
                         time.sleep(min(2 ** attempt, 8))
