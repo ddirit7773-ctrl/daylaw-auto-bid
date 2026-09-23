@@ -5,6 +5,8 @@ import os
 import sys
 from pathlib import Path
 
+from dotenv import load_dotenv
+
 
 def app_root() -> Path:
     if getattr(sys, "frozen", False):
@@ -14,6 +16,23 @@ def app_root() -> Path:
 
 APP_ROOT = app_root()
 os.chdir(APP_ROOT)
+os.environ["DAYLAW_APP_ROOT"] = str(APP_ROOT)
+
+
+def load_app_env() -> Path:
+    """Load the portable sidecar .env from the same folder as the EXE.
+
+    python-dotenv's implicit discovery can point at PyInstaller's internal bundle
+    directory in a frozen app. Always using APP_ROOT makes the Windows portable
+    layout deterministic.
+    """
+    env_path = APP_ROOT / ".env"
+    if env_path.exists():
+        load_dotenv(dotenv_path=env_path, override=True)
+    return env_path
+
+
+ENV_PATH = load_app_env()
 
 
 BACKENDS = {
@@ -26,6 +45,9 @@ BACKENDS = {
 
 
 def run_backend(name: str, argv: list[str]) -> int:
+    # Reload before every backend action so editing .env while the GUI is open
+    # is picked up without reinstalling or moving files.
+    load_app_env()
     module_name = BACKENDS.get(name)
     if not module_name:
         print(f"Unknown backend: {name}")
@@ -43,11 +65,25 @@ def run_backend(name: str, argv: list[str]) -> int:
         sys.argv = old_argv
 
 
+def _env_self_test() -> int:
+    load_app_env()
+    required = ("NAVER_API_KEY", "NAVER_SECRET_KEY", "NAVER_CUSTOMER_ID")
+    missing = [name for name in required if not os.getenv(name, "").strip()]
+    if missing:
+        print("DAYLAW ENV SELF TEST FAILED: " + ", ".join(missing))
+        return 3
+    print("DAYLAW ENV SELF TEST OK")
+    return 0
+
+
 def main() -> int:
     if len(sys.argv) >= 2 and sys.argv[1] == "--self-test":
         import desktop_app_v4  # noqa: F401
         print("DAYLAW PACKAGED SELF TEST OK")
         return 0
+
+    if len(sys.argv) >= 2 and sys.argv[1] == "--env-self-test":
+        return _env_self_test()
 
     if len(sys.argv) >= 3 and sys.argv[1] == "--backend":
         return run_backend(sys.argv[2], sys.argv[3:])
