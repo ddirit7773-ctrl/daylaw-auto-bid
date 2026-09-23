@@ -1,0 +1,50 @@
+name: Build Windows Desktop App
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        shell: pwsh
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements-build.txt
+
+      - name: Compile check
+        shell: pwsh
+        run: |
+          python -m py_compile daylaw_app.py desktop_app.py desktop_app_v2.py desktop_app_v3.py desktop_app_v4.py restore_deleted_keyword.py query_account_stats.py execute_v2_delete.py
+
+      - name: Build portable app
+        shell: pwsh
+        run: |
+          pyinstaller --noconfirm DAYLAWKeywordCleaner.spec
+
+      - name: Add writable folders and env template
+        shell: pwsh
+        run: |
+          $root = "dist/DAYLAW Keyword Cleaner"
+          New-Item -ItemType Directory -Force -Path "$root/data/backups" | Out-Null
+          New-Item -ItemType Directory -Force -Path "$root/data/stats" | Out-Null
+          New-Item -ItemType Directory -Force -Path "$root/data/state" | Out-Null
+          New-Item -ItemType Directory -Force -Path "$root/logs" | Out-Null
+          if (Test-Path ".env.example") { Copy-Item ".env.example" "$root/.env.example" -Force }
+          Compress-Archive -Path "$root/*" -DestinationPath "DAYLAW-Keyword-Cleaner-Windows.zip" -Force
+
+      - name: Upload Windows artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: DAYLAW-Keyword-Cleaner-Windows
+          path: DAYLAW-Keyword-Cleaner-Windows.zip
+          if-no-files-found: error
