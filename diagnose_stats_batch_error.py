@@ -49,7 +49,6 @@ def main() -> int:
     )
 
     fields = json.dumps(["impCnt", "clkCnt"], separators=(",", ":"))
-    # Reuse the exact date range stored in the latest scan row.
     with source.open("r", encoding="utf-8-sig", newline="") as fp:
         rows = list(csv.DictReader(fp))
     first = next(row for row in rows if row.get("reason") == "stats_incomplete")
@@ -66,7 +65,7 @@ def main() -> int:
     for size in BATCH_SIZES:
         batch = ids[:size]
         params = {
-            "ids": json.dumps(batch, separators=(",", ":")),
+            "ids": list(batch),
             "fields": fields,
             "timeRange": time_range,
             "timeIncrement": "allDays",
