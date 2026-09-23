@@ -44,6 +44,11 @@ def run_backend(name: str, argv: list[str]) -> int:
 
 
 def main() -> int:
+    if len(sys.argv) >= 2 and sys.argv[1] == "--self-test":
+        import desktop_app_v4  # noqa: F401
+        print("DAYLAW PACKAGED SELF TEST OK")
+        return 0
+
     if len(sys.argv) >= 3 and sys.argv[1] == "--backend":
         return run_backend(sys.argv[2], sys.argv[3:])
 
