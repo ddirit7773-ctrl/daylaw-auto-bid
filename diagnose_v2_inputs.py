@@ -12,6 +12,8 @@ from src.keyword_cleaner.naver_api import NaverConfig, NaverSearchAdsClient
 
 KST = ZoneInfo("Asia/Seoul")
 SAMPLE_SIZE = 100
+SINGULAR_MISSING_PROBE = 10
+SINGULAR_RETURNED_PROBE = 3
 
 
 def stats_range(days: int) -> tuple[str, str]:
@@ -31,6 +33,54 @@ def short_status(row: dict) -> dict[str, object]:
         "useGroupBidAmt",
     )
     return {key: row.get(key) for key in keys if key in row}
+
+
+def extract_stat_values(payload: object) -> tuple[int | None, int | None]:
+    """Normalize singular /stats response to (impCnt, clkCnt)."""
+    if not isinstance(payload, dict):
+        return None, None
+
+    # Singular `id` requests usually return the fields directly.
+    if "impCnt" in payload or "clkCnt" in payload:
+        try:
+            imp = int(float(payload.get("impCnt", 0) or 0))
+            clk = int(float(payload.get("clkCnt", 0) or 0))
+            return imp, clk
+        except (TypeError, ValueError):
+            return None, None
+
+    # Be defensive in case the API wraps the result.
+    rows = payload.get("data")
+    if isinstance(rows, list) and rows and isinstance(rows[0], dict):
+        try:
+            imp = int(float(rows[0].get("impCnt", 0) or 0))
+            clk = int(float(rows[0].get("clkCnt", 0) or 0))
+            return imp, clk
+        except (TypeError, ValueError):
+            return None, None
+
+    return None, None
+
+
+def singular_stats(
+    client: NaverSearchAdsClient,
+    keyword_id: str,
+    *,
+    since: str,
+    until: str,
+    fields: str,
+) -> tuple[int | None, int | None]:
+    time_range = json.dumps({"since": since, "until": until}, separators=(",", ":"))
+    payload = client._request(
+        "GET",
+        "/stats",
+        params={
+            "id": keyword_id,
+            "fields": fields,
+            "timeRange": time_range,
+        },
+    )
+    return extract_stat_values(payload)
 
 
 def main() -> int:
@@ -127,6 +177,66 @@ def main() -> int:
     print(f"  Returned rows  : {len(rows):,}")
     print(f"  Returned IDs   : {len(returned_ids):,}")
     print(f"  Missing IDs    : {len(missing):,}")
+
+    print("")
+    print("Singular verification for IDs omitted from multi-id /stats")
+    missing_probe = missing[:SINGULAR_MISSING_PROBE]
+    confirmed_zero = 0
+    nonzero = 0
+    unknown = 0
+    for index, kid in enumerate(missing_probe, start=1):
+        imp, clk = singular_stats(
+            client,
+            kid,
+            since=since,
+            until=until,
+            fields=fields,
+        )
+        if imp is None or clk is None:
+            label = "UNKNOWN"
+            unknown += 1
+        elif imp == 0 and clk == 0:
+            label = "ZERO_CONFIRMED"
+            confirmed_zero += 1
+        else:
+            label = "NONZERO"
+            nonzero += 1
+        print(f"  MISSING PROBE {index:02d}: imp={imp}, clk={clk}, {label}")
+
+    print("")
+    print("Cross-check for IDs returned by multi-id /stats")
+    returned_probe = list(returned_ids)[:SINGULAR_RETURNED_PROBE]
+    row_by_id = {
+        str(row.get("id", "")).strip(): row
+        for row in rows
+        if isinstance(row, dict) and str(row.get("id", "")).strip()
+    }
+    matches = 0
+    for index, kid in enumerate(returned_probe, start=1):
+        row = row_by_id[kid]
+        multi_imp = int(float(row.get("impCnt", 0) or 0))
+        multi_clk = int(float(row.get("clkCnt", 0) or 0))
+        single_imp, single_clk = singular_stats(
+            client,
+            kid,
+            since=since,
+            until=until,
+            fields=fields,
+        )
+        matched = (multi_imp, multi_clk) == (single_imp, single_clk)
+        matches += int(matched)
+        print(
+            f"  RETURNED PROBE {index:02d}: multi={multi_imp}/{multi_clk}, "
+            f"single={single_imp}/{single_clk}, match={matched}"
+        )
+
+    print("")
+    print("Diagnostic summary")
+    print(f"  Missing probed        : {len(missing_probe):,}")
+    print(f"  Confirmed 0/0         : {confirmed_zero:,}")
+    print(f"  Unexpected non-zero   : {nonzero:,}")
+    print(f"  Unknown singular data : {unknown:,}")
+    print(f"  Returned cross-checks : {matches:,}/{len(returned_probe):,} matched")
     print("")
     print("This diagnostic did not modify or delete anything.")
     return 0
