@@ -36,12 +36,7 @@ def short_status(row: dict) -> dict[str, object]:
 
 
 def extract_stat_values(payload: object) -> tuple[int | None, int | None, int]:
-    """Normalize a singular /stats response to aggregate (impCnt, clkCnt, row_count).
-
-    `timeIncrement=allDays` should normally make a single aggregate row, but the
-    summing fallback prevents us from accidentally treating only the first daily
-    row as the whole requested range if the API still returns multiple rows.
-    """
+    """Normalize a singular /stats response to aggregate (impCnt, clkCnt, row_count)."""
     if not isinstance(payload, dict):
         return None, None, 0
 
@@ -80,17 +75,21 @@ def singular_stats(
     since: str,
     until: str,
     fields: str,
+    all_days: bool,
 ) -> tuple[int | None, int | None, int]:
     time_range = json.dumps({"since": since, "until": until}, separators=(",", ":"))
+    params: dict[str, object] = {
+        "id": keyword_id,
+        "fields": fields,
+        "timeRange": time_range,
+    }
+    if all_days:
+        params["timeIncrement"] = "allDays"
+
     payload = client._request(
         "GET",
         "/stats",
-        params={
-            "id": keyword_id,
-            "fields": fields,
-            "timeRange": time_range,
-            "timeIncrement": "allDays",
-        },
+        params=params,
     )
     return extract_stat_values(payload)
 
@@ -106,11 +105,7 @@ def main() -> int:
     campaigns = client.get_campaigns()
     print(f"Campaigns: {len(campaigns):,}")
     for campaign in campaigns[:10]:
-        print(
-            "  CAMPAIGN",
-            campaign.get("name"),
-            short_status(campaign),
-        )
+        print("  CAMPAIGN", campaign.get("name"), short_status(campaign))
 
     sample_keywords: list[dict] = []
     sampled_adgroups: list[dict] = []
@@ -166,8 +161,6 @@ def main() -> int:
     fields = json.dumps(["impCnt", "clkCnt"], separators=(",", ":"))
     time_range = json.dumps({"since": since, "until": until}, separators=(",", ":"))
 
-    # Mirror Naver's official sample shape: pass one list-valued `ids`
-    # parameter and explicitly aggregate the whole range with allDays.
     payload = client._request(
         "GET",
         "/stats",
@@ -177,7 +170,7 @@ def main() -> int:
             "timeRange": time_range,
             "timeIncrement": "allDays",
         },
-    )  # diagnostic only
+    )
 
     if isinstance(payload, dict):
         rows = payload.get("data", [])
@@ -202,31 +195,48 @@ def main() -> int:
     print(f"  Missing IDs    : {len(missing):,}")
 
     print("")
-    print("Singular verification for IDs omitted from multi-id /stats")
+    print("Dual singular verification for IDs omitted from multi-id /stats")
+    print("  allDays may omit true-zero rows, so each probe is also checked without timeIncrement.")
     missing_probe = missing[:SINGULAR_MISSING_PROBE]
     confirmed_zero = 0
     nonzero = 0
     unknown = 0
+    omission_confirmed = 0
+
     for index, kid in enumerate(missing_probe, start=1):
-        imp, clk, row_count = singular_stats(
+        all_imp, all_clk, all_rows = singular_stats(
             client,
             kid,
             since=since,
             until=until,
             fields=fields,
+            all_days=True,
         )
-        if imp is None or clk is None:
-            label = "UNKNOWN"
-            unknown += 1
-        elif imp == 0 and clk == 0:
+        legacy_imp, legacy_clk, legacy_rows = singular_stats(
+            client,
+            kid,
+            since=since,
+            until=until,
+            fields=fields,
+            all_days=False,
+        )
+
+        if legacy_imp == 0 and legacy_clk == 0:
             label = "ZERO_CONFIRMED"
             confirmed_zero += 1
+            if all_rows == 0 and all_imp is None and all_clk is None:
+                omission_confirmed += 1
+        elif legacy_imp is None or legacy_clk is None:
+            label = "UNKNOWN"
+            unknown += 1
         else:
             label = "NONZERO"
             nonzero += 1
+
         print(
-            f"  MISSING PROBE {index:02d}: imp={imp}, clk={clk}, "
-            f"rows={row_count}, {label}"
+            f"  MISSING PROBE {index:02d}: "
+            f"allDays={all_imp}/{all_clk} rows={all_rows}; "
+            f"legacy={legacy_imp}/{legacy_clk} rows={legacy_rows}; {label}"
         )
 
     print("")
@@ -248,6 +258,7 @@ def main() -> int:
             since=since,
             until=until,
             fields=fields,
+            all_days=True,
         )
         matched = (multi_imp, multi_clk) == (single_imp, single_clk)
         matches += int(matched)
@@ -258,11 +269,12 @@ def main() -> int:
 
     print("")
     print("Diagnostic summary")
-    print(f"  Missing probed        : {len(missing_probe):,}")
-    print(f"  Confirmed 0/0         : {confirmed_zero:,}")
-    print(f"  Unexpected non-zero   : {nonzero:,}")
-    print(f"  Unknown singular data : {unknown:,}")
-    print(f"  Returned cross-checks : {matches:,}/{len(returned_probe):,} matched")
+    print(f"  Missing probed          : {len(missing_probe):,}")
+    print(f"  Confirmed 0/0           : {confirmed_zero:,}")
+    print(f"  allDays zero omissions  : {omission_confirmed:,}")
+    print(f"  Unexpected non-zero     : {nonzero:,}")
+    print(f"  Unknown singular data   : {unknown:,}")
+    print(f"  Returned cross-checks   : {matches:,}/{len(returned_probe):,} matched")
     print("")
     print("This diagnostic did not modify or delete anything.")
     return 0
