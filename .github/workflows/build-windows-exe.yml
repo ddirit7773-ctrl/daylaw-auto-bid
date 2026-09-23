@@ -31,6 +31,12 @@ jobs:
         run: |
           pyinstaller --noconfirm DAYLAWKeywordCleaner.spec
 
+      - name: Smoke test packaged executable
+        shell: pwsh
+        run: |
+          & "dist/DAYLAW Keyword Cleaner/DAYLAW Keyword Cleaner.exe" --self-test
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
       - name: Add editable config, writable folders, and env template
         shell: pwsh
         run: |
