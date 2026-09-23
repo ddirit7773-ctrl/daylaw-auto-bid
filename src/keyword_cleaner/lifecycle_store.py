@@ -41,6 +41,12 @@ class LifecycleStore:
     def close(self) -> None:
         self.conn.close()
 
+    def commit(self) -> None:
+        self.conn.commit()
+
+    def rollback(self) -> None:
+        self.conn.rollback()
+
     def _init_schema(self) -> None:
         self.conn.executescript(
             """
@@ -93,6 +99,7 @@ class LifecycleStore:
         decision: str,
         reason: str,
         observed_at: str | None = None,
+        commit: bool = True,
     ) -> PendingState:
         observed_at = observed_at or _utc_now_iso()
         existing = self.conn.execute(
@@ -148,7 +155,8 @@ class LifecycleStore:
                 observed_at,
             ),
         )
-        self.conn.commit()
+        if commit:
+            self.conn.commit()
         return self.get_state(identity_key)
 
     def get_state(self, identity_key: str) -> PendingState:
