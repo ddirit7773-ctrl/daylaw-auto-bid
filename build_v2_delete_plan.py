@@ -10,6 +10,7 @@ from pathlib import Path
 BACKUP_DIR = Path("data/backups")
 PER_GROUP_DELETE_CAP = 0.50
 MIN_GROUP_SURVIVORS = 4
+ELIGIBLE_STATUSES = {"DELETE_PENDING", "DELETE_APPROVED"}
 
 
 def latest_v2_scan() -> Path:
@@ -38,6 +39,10 @@ def write_csv(path: Path, rows: list[dict[str, object]], fields: list[str]) -> N
         writer.writerows(rows)
 
 
+def is_general_delete_candidate(row: dict[str, str]) -> bool:
+    return row.get("status") in ELIGIBLE_STATUSES and row.get("tier") == "GENERAL"
+
+
 def main() -> int:
     source = latest_v2_scan()
     rows = read_rows(source)
@@ -56,26 +61,18 @@ def main() -> int:
     group_allowance: dict[tuple[str, str], int] = {}
     for key, group_rows in by_group.items():
         total = len(group_rows)
-        pending_general = sum(
-            1
-            for row in group_rows
-            if row.get("status") == "DELETE_PENDING" and row.get("tier") == "GENERAL"
-        )
+        pending_general = sum(1 for row in group_rows if is_general_delete_candidate(row))
         cap_by_rate = math.floor(total * PER_GROUP_DELETE_CAP)
         cap_by_survivors = max(total - MIN_GROUP_SURVIVORS, 0)
         group_allowance[key] = max(min(pending_general, cap_by_rate, cap_by_survivors), 0)
 
-    candidates = [
-        row
-        for row in rows
-        if row.get("status") == "DELETE_PENDING" and row.get("tier") == "GENERAL"
-    ]
+    candidates = [row for row in rows if is_general_delete_candidate(row)]
 
-    # Safest first: oldest keywords first. Every DELETE_PENDING row already has
-    # 0 impressions / 0 clicks in the inactivity window and 0 clicks in the
-    # click-protection window. TYPE_CORE is intentionally excluded in wave 1.
+    # Safest first: DELETE_APPROVED before DELETE_PENDING, then oldest keywords.
+    # TYPE_CORE is intentionally excluded in wave 1.
     candidates.sort(
         key=lambda row: (
+            0 if row.get("status") == "DELETE_APPROVED" else 1,
             -as_int(row.get("age_days"), 0),
             row.get("campaign_name", ""),
             row.get("adgroup_name", ""),
@@ -94,7 +91,8 @@ def main() -> int:
             out = dict(row)
             out["plan_action"] = "TARGET_DELETE_AFTER_APPROVAL"
             out["plan_reason"] = (
-                "GENERAL_DELETE_PENDING; oldest-first; TYPE_CORE excluded; "
+                "GENERAL delete candidate; approved-first then oldest-first; "
+                "TYPE_CORE excluded; "
                 f"group delete cap={int(PER_GROUP_DELETE_CAP*100)}%; "
                 f"min survivors={MIN_GROUP_SURVIVORS}"
             )
@@ -121,11 +119,7 @@ def main() -> int:
         campaign_name = group_rows[0].get("campaign_name", "")
         adgroup_name = group_rows[0].get("adgroup_name", "")
         total = len(group_rows)
-        pending_general = sum(
-            1
-            for row in group_rows
-            if row.get("status") == "DELETE_PENDING" and row.get("tier") == "GENERAL"
-        )
+        pending_general = sum(1 for row in group_rows if is_general_delete_candidate(row))
         selected_count = selected_per_group.get(key, 0)
         group_rows_out.append(
             {
@@ -156,15 +150,20 @@ def main() -> int:
         ],
     )
 
+    approved_in_plan = sum(1 for row in selected if row.get("status") == "DELETE_APPROVED")
+    pending_in_plan = len(selected) - approved_in_plan
+
     print("=" * 72)
     print("V2 TARGET DELETE PLAN — PLAN ONLY / NO API / NO DELETION")
     print("=" * 72)
     print(f"Source                  : {source}")
     print(f"Current keywords        : {len(rows):,}")
     print(f"Account target removals : {target:,}")
-    print(f"GENERAL pending pool    : {len(candidates):,}")
+    print(f"GENERAL candidate pool  : {len(candidates):,}")
     print(f"TYPE_CORE selected      : 0")
     print(f"Planned target deletes  : {len(selected):,}")
+    print(f"  approved now          : {approved_in_plan:,}")
+    print(f"  waiting recheck       : {pending_in_plan:,}")
     print(f"Held GENERAL candidates : {len(held):,}")
     print(f"Per-group max delete    : {int(PER_GROUP_DELETE_CAP*100)}%")
     print(f"Min survivors/group     : {MIN_GROUP_SURVIVORS}")
