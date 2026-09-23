@@ -49,13 +49,15 @@ def get_verified_keyword_stats(
 ) -> dict[str, VerifiedKeywordStat]:
     """Fetch keyword stats without converting request failures into zero.
 
-    Naver multi-id /stats may omit rows with no activity. Our diagnostic showed
-    returned rows match singular totals when timeIncrement=allDays is used.
-    Because these ids were freshly fetched from /ncc/keywords, a successful
-    batch request plus an omitted id is treated as a zero-total observation.
+    Naver multi-id /stats accepts ids as a repeated/list query parameter, not
+    as one JSON-encoded string. The earlier V2 batch error came from encoding
+    the entire list into one string, which the API interpreted as an invalid
+    single id.
 
-    A failed batch is never treated as zero: every id in that failed batch is
-    marked incomplete so the deletion policy cannot approve it.
+    A failed batch is never treated as zero. A successful batch may omit true
+    zero rows; because the ids were freshly fetched from /ncc/keywords and this
+    behavior was cross-checked with singular requests, omitted ids in a
+    successful batch are treated as confirmed 0/0 observations.
     """
     clean_ids = [str(value).strip() for value in keyword_ids if str(value).strip()]
     result: dict[str, VerifiedKeywordStat] = {}
@@ -68,7 +70,7 @@ def get_verified_keyword_stats(
 
     for batch in _chunks(clean_ids, batch_size):
         params = {
-            "ids": json.dumps(list(batch), separators=(",", ":")),
+            "ids": list(batch),
             "fields": fields,
             "timeRange": time_range,
             "timeIncrement": "allDays",
@@ -132,7 +134,6 @@ def get_singular_verified_keyword_stat(
     A successful singular /stats request can also return no row for a true 0/0
     keyword. In that case we separately fetch the keyword object itself. Only
     when the keyword still exists do we accept the empty stats response as 0/0.
-    This distinguishes a zero-total keyword from request failure or a stale id.
     """
     keyword_id = str(keyword_id).strip()
     if not keyword_id:
