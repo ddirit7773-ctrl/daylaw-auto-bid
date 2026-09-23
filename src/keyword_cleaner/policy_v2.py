@@ -256,11 +256,28 @@ def classify_snapshot(
         if tier == "TYPE_CORE"
         else policy.general_protection_days
     )
+    inactivity_days = (
+        policy.type_core_inactivity_days
+        if tier == "TYPE_CORE"
+        else policy.general_inactivity_days
+    )
+
     if snapshot.age_days < protection_days:
         return PolicyDecision(
             "PROTECTED_NEW",
             tier,
             f"age={snapshot.age_days}d<protection={protection_days}d",
+            True,
+        )
+
+    # A keyword cannot truthfully satisfy a 30d/45d inactivity rule until it
+    # has existed for that full observation window. This guard prevents, for
+    # example, a 21-day-old GENERAL keyword from being treated as 30d inactive.
+    if snapshot.age_days < inactivity_days:
+        return PolicyDecision(
+            "PROTECTED_NEW",
+            tier,
+            f"age={snapshot.age_days}d<inactivity_observation={inactivity_days}d",
             True,
         )
 
@@ -316,11 +333,6 @@ def classify_snapshot(
             False,
         )
 
-    inactivity_days = (
-        policy.type_core_inactivity_days
-        if tier == "TYPE_CORE"
-        else policy.general_inactivity_days
-    )
     return PolicyDecision(
         "DELETE_PENDING",
         tier,
