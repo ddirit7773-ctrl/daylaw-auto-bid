@@ -27,6 +27,10 @@ class DesktopAppV4(DesktopAppV3):
     does not require a separate Python installation.
     """
 
+    def __init__(self) -> None:
+        self.backend_running = False
+        super().__init__()
+
     @staticmethod
     def backend_command(filename: str, *args: str) -> list[str]:
         stem = Path(filename).stem
@@ -35,15 +39,90 @@ class DesktopAppV4(DesktopAppV3):
         return [sys.executable, str(APP_ROOT / filename), *args]
 
     def run_script(self, filename: str) -> None:
-        try:
-            subprocess.Popen(self.backend_command(filename), cwd=str(APP_ROOT))
-        except Exception as exc:
-            messagebox.showerror("실행 실패", str(exc))
+        """Run backend work in the background, report progress, and refresh UI.
+
+        Older builds detached the backend with Popen, so the user saw no visible
+        progress and the dashboard stayed stale until manually revisited.  This
+        runner keeps the GUI responsive while tracking completion and surfaces
+        backend errors inside the app instead of a separate crash dialog.
+        """
+        if self.backend_running:
+            messagebox.showinfo("작업 진행 중", "이미 작업이 실행 중입니다. 완료될 때까지 기다려주세요.")
             return
-        messagebox.showinfo(
-            "실행 시작",
-            f"{filename} 실행을 시작했습니다.\n완료 후 화면을 새로고침하면 결과가 반영됩니다.",
-        )
+
+        command = self.backend_command(filename)
+        labels = {
+            "run_v2_scan.py": "V2 전체 스캔",
+            "build_v2_delete_plan.py": "안전 삭제 계획 생성",
+            "execute_v2_delete.py": "삭제 실행기 DRY RUN",
+        }
+        label = labels.get(filename, filename)
+        self.backend_running = True
+
+        if hasattr(self, "status_text"):
+            self.status_text.delete("1.0", "end")
+            self.status_text.insert(
+                "1.0",
+                f"{label} 실행 중입니다.\n\n창을 닫지 말고 기다려주세요.\n완료되면 자동으로 결과를 새로고침합니다.",
+            )
+
+        def worker() -> None:
+            try:
+                completed = subprocess.run(
+                    command,
+                    cwd=str(APP_ROOT),
+                    capture_output=True,
+                    text=True,
+                    encoding="utf-8",
+                    errors="replace",
+                )
+                output = (completed.stdout or "").strip()
+                error = (completed.stderr or "").strip()
+                self.after(
+                    0,
+                    lambda: self._finish_backend_job(
+                        filename,
+                        label,
+                        completed.returncode,
+                        output,
+                        error,
+                    ),
+                )
+            except Exception as exc:
+                self.after(
+                    0,
+                    lambda: self._finish_backend_job(filename, label, 1, "", str(exc)),
+                )
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _finish_backend_job(
+        self,
+        filename: str,
+        label: str,
+        returncode: int,
+        stdout: str,
+        stderr: str,
+    ) -> None:
+        self.backend_running = False
+        if returncode != 0:
+            detail = stderr or stdout or "알 수 없는 오류"
+            if len(detail) > 3500:
+                detail = detail[-3500:]
+            messagebox.showerror(f"{label} 실패", detail)
+            # Restore whatever valid data was already on disk.
+            self.refresh_dashboard()
+            return
+
+        self.refresh_dashboard()
+        if hasattr(self, "refresh_delete_queue"):
+            self.refresh_delete_queue()
+        if filename == "run_v2_scan.py":
+            messagebox.showinfo("스캔 완료", "V2 전체 스캔이 완료되었습니다. 대시보드가 자동으로 갱신되었습니다.")
+        elif filename == "build_v2_delete_plan.py":
+            messagebox.showinfo("계획 생성 완료", "안전 삭제 계획 생성이 완료되었습니다.")
+        else:
+            messagebox.showinfo("작업 완료", f"{label} 작업이 완료되었습니다.")
 
     def run_stats_query(self) -> None:
         if self.stats_running:
