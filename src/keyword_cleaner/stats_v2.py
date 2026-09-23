@@ -47,18 +47,15 @@ def get_verified_keyword_stats(
     until: str,
     batch_size: int = 100,
 ) -> dict[str, VerifiedKeywordStat]:
-    """Fetch keyword stats without confusing API failure with a real zero.
+    """Fetch keyword stats without converting request failures into zero.
 
-    The Naver multi-id /stats endpoint can omit keywords whose totals are 0/0.
-    We validated this behavior with singular probes, but a request failure must
-    never be silently converted to zero. Therefore:
+    Naver multi-id /stats may omit rows with no activity. Our diagnostic showed
+    returned rows match singular totals when timeIncrement=allDays is used.
+    Because these ids were freshly fetched from /ncc/keywords, a successful
+    batch request plus an omitted id is treated as a zero-total observation.
 
-    - successful batch + returned row -> explicit API values
-    - successful batch + omitted id  -> confirmed-by-contract zero candidate
-    - failed batch                    -> incomplete / unknown (never zero)
-
-    This function is suitable for full scans. Delete execution should still
-    singularly re-check each selected keyword immediately before deletion.
+    A failed batch is never treated as zero: every id in that failed batch is
+    marked incomplete so the deletion policy cannot approve it.
     """
     clean_ids = [str(value).strip() for value in keyword_ids if str(value).strip()]
     result: dict[str, VerifiedKeywordStat] = {}
@@ -112,9 +109,6 @@ def get_verified_keyword_stats(
                     source="multi_returned",
                 )
             else:
-                # Diagnostic probes confirmed that successful multi-id /stats
-                # omits zero-total keyword rows. Request success is essential:
-                # a request error is handled above as incomplete instead.
                 result[keyword_id] = VerifiedKeywordStat(
                     keyword_id=keyword_id,
                     impressions=0,
@@ -133,7 +127,13 @@ def get_singular_verified_keyword_stat(
     since: str,
     until: str,
 ) -> VerifiedKeywordStat:
-    """Single-keyword verification for the final delete gate."""
+    """Single-keyword verification for the final delete gate.
+
+    A successful singular /stats request can also return no row for a true 0/0
+    keyword. In that case we separately fetch the keyword object itself. Only
+    when the keyword still exists do we accept the empty stats response as 0/0.
+    This distinguishes a zero-total keyword from request failure or a stale id.
+    """
     keyword_id = str(keyword_id).strip()
     if not keyword_id:
         return VerifiedKeywordStat(
@@ -168,13 +168,35 @@ def get_singular_verified_keyword_stat(
 
     rows = _parse_rows(payload)
     if not rows:
+        try:
+            current = client.get_keyword(keyword_id)
+        except NaverSearchAdsError as exc:
+            return VerifiedKeywordStat(
+                keyword_id=keyword_id,
+                impressions=None,
+                clicks=None,
+                complete=False,
+                source="singular_empty_keyword_unverified",
+                error=str(exc),
+            )
+
+        current_id = str(current.get("nccKeywordId", "")).strip()
+        if current_id != keyword_id:
+            return VerifiedKeywordStat(
+                keyword_id=keyword_id,
+                impressions=None,
+                clicks=None,
+                complete=False,
+                source="singular_empty_keyword_mismatch",
+                error=f"keyword lookup returned {current_id!r}",
+            )
+
         return VerifiedKeywordStat(
             keyword_id=keyword_id,
-            impressions=None,
-            clicks=None,
-            complete=False,
-            source="singular_empty",
-            error="singular /stats returned no row",
+            impressions=0,
+            clicks=0,
+            complete=True,
+            source="singular_empty_zero_keyword_exists",
         )
 
     impressions = sum(_to_int(row.get("impCnt")) for row in rows)
