@@ -7,6 +7,7 @@ datas = [
     (".env.example", "."),
 ]
 datas += collect_data_files("customtkinter")
+datas += collect_data_files("tzdata")
 
 hiddenimports = [
     "run_v2_scan",
@@ -18,6 +19,8 @@ hiddenimports = [
     "desktop_app_v2",
     "desktop_app_v3",
     "desktop_app_v4",
+    "tzdata",
+    "tzdata.zoneinfo",
 ]
 
 a = Analysis(
