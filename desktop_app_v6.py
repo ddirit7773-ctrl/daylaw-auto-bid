@@ -15,12 +15,14 @@ from desktop_app_v5 import DesktopAppV5, PRIMARY, PRIMARY_HOVER, TEXT, MUTED, BO
 
 
 class DesktopAppV6(DesktopAppV5):
-    """v10 shell: streamed backend progress, percentage and ETA."""
+    """v11 shell: streamed progress + safe-fast bulk read mode."""
 
     def __init__(self) -> None:
         self._job_started_at = 0.0
         self._job_phase = ""
         self._job_percent = 0.0
+        self._fast_workers = 1
+        self._fast_batch_size = 100
         super().__init__()
         self._retag_version(self.sidebar)
         self._build_progress_overlay()
@@ -29,8 +31,12 @@ class DesktopAppV6(DesktopAppV5):
         for child in widget.winfo_children():
             try:
                 text = child.cget("text")
-                if isinstance(text, str) and "v9" in text:
-                    child.configure(text=text.replace("v9", "v10"))
+                if isinstance(text, str):
+                    if "v9" in text:
+                        text = text.replace("v9", "v11")
+                    if "v10" in text:
+                        text = text.replace("v10", "v11")
+                    child.configure(text=text)
             except Exception:
                 pass
             self._retag_version(child)
@@ -90,6 +96,8 @@ class DesktopAppV6(DesktopAppV5):
         self._job_started_at = time.monotonic()
         self._job_percent = 2.0
         self._job_phase = "start"
+        self._fast_workers = 1
+        self._fast_batch_size = 100
         self.progress_title.configure(text=f"{label} · 시작 중")
         self.progress_meta.configure(text="2%")
         self.progress_detail.configure(text="네이버 광고 데이터를 준비하고 있습니다.")
@@ -119,6 +127,22 @@ class DesktopAppV6(DesktopAppV5):
         if not text:
             return
 
+        fast_match = re.match(
+            r"@@FAST_STATS\|workers=(\d+)\|batch_size=(\d+)\|batches=(\d+)",
+            text,
+        )
+        if fast_match:
+            self._fast_workers = int(fast_match.group(1))
+            self._fast_batch_size = int(fast_match.group(2))
+            batches = int(fast_match.group(3))
+            self.progress_detail.configure(
+                text=(
+                    f"안전 고속 조회 · {self._fast_workers}개 동시 · "
+                    f"{self._fast_batch_size}개/배치 · 총 {batches:,}배치"
+                )
+            )
+            return
+
         if job_kind == "scan":
             if "[1/6]" in text:
                 self._job_phase = "scan_structure"
@@ -130,15 +154,15 @@ class DesktopAppV6(DesktopAppV5):
                 return
             if "[3/6]" in text:
                 self._job_phase = "type_stats"
-                self._set_progress(40, f"{label} · 유형 핵심 통계", text)
+                self._set_progress(44, f"{label} · 유형 핵심 통계", text)
                 return
             if "[4/6]" in text:
                 self._job_phase = "click_stats"
-                self._set_progress(56, f"{label} · 클릭 보호 이력", text)
+                self._set_progress(58, f"{label} · 클릭 보호 이력", text)
                 return
             if "[5/6]" in text:
                 self._job_phase = "classify"
-                self._set_progress(82, f"{label} · 판정 적용", "보호/유지/관찰/삭제대기 상태를 계산 중입니다.")
+                self._set_progress(84, f"{label} · 판정 적용", "보호/유지/관찰/삭제대기 상태를 계산 중입니다.")
                 return
             if "[6/6]" in text or "SAFE STOP" in text:
                 self._job_phase = "complete"
@@ -149,7 +173,7 @@ class DesktopAppV6(DesktopAppV5):
             if classified:
                 current = int(classified.group(1).replace(",", ""))
                 total = max(int(classified.group(2).replace(",", "")), 1)
-                pct = 82 + (current / total) * 16
+                pct = 84 + (current / total) * 14
                 self._set_progress(pct, f"{label} · 판정 적용", f"{current:,} / {total:,}개 분류 완료")
                 return
 
@@ -171,17 +195,22 @@ class DesktopAppV6(DesktopAppV5):
             total = max(int(stat_match.group(2)), 1)
             ratio = done / total
             ranges = {
-                "general_stats": (16, 39),
-                "type_stats": (40, 55),
-                "click_stats": (56, 80),
+                "general_stats": (16, 43),
+                "type_stats": (44, 57),
+                "click_stats": (58, 82),
                 "query_stats": (20, 92),
             }
             start, end = ranges.get(self._job_phase, (10, 90))
             pct = start + ratio * (end - start)
+            speed = (
+                f" · {self._fast_workers}개 동시"
+                if self._fast_workers > 1
+                else ""
+            )
             self._set_progress(
                 pct,
                 self.progress_title.cget("text"),
-                f"통계 요청 {done:,} / {total:,} 배치 완료",
+                f"통계 요청 {done:,} / {total:,} 배치 완료{speed}",
             )
             return
 
