@@ -94,7 +94,7 @@ def _stdio_self_test() -> int:
 
 def main() -> int:
     if len(sys.argv) >= 2 and sys.argv[1] == "--self-test":
-        import desktop_app_v5  # noqa: F401
+        import desktop_app_v6  # noqa: F401
         print("DAYLAW PACKAGED SELF TEST OK")
         return 0
 
@@ -120,9 +120,9 @@ def main() -> int:
     desktop_app_v3.ROOT_DIR = APP_ROOT
     desktop_app_v3.BACKUP_DIR = APP_ROOT / "data" / "backups"
 
-    from desktop_app_v5 import DesktopAppV5
+    from desktop_app_v6 import DesktopAppV6
 
-    app = DesktopAppV5()
+    app = DesktopAppV6()
     app.mainloop()
     return 0
 
