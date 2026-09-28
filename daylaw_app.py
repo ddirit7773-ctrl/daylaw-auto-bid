@@ -19,6 +19,28 @@ os.chdir(APP_ROOT)
 os.environ["DAYLAW_APP_ROOT"] = str(APP_ROOT)
 
 
+def _force_utf8_stdio() -> None:
+    """Make packaged backend stdout/stderr deterministic on Korean Windows.
+
+    When the frozen GUI relaunches itself in backend mode, Windows can expose
+    stdout/stderr as CP949. Some of our status banners contain Unicode punctuation
+    such as an em dash, which then raises UnicodeEncodeError before any API work
+    starts. Reconfigure the current process streams to UTF-8 and replace only as
+    a final fallback so backend output can always be captured by the GUI.
+    """
+    os.environ["PYTHONIOENCODING"] = "utf-8"
+    for name in ("stdout", "stderr"):
+        stream = getattr(sys, name, None)
+        if stream is None:
+            continue
+        reconfigure = getattr(stream, "reconfigure", None)
+        if callable(reconfigure):
+            try:
+                reconfigure(encoding="utf-8", errors="replace")
+            except (OSError, ValueError):
+                pass
+
+
 def load_app_env() -> Path:
     """Load the portable sidecar .env from the same folder as the EXE.
 
@@ -45,6 +67,11 @@ BACKENDS = {
 
 
 def run_backend(name: str, argv: list[str]) -> int:
+    # Backend output is captured as UTF-8 by the GUI. Force the child process to
+    # emit UTF-8 too, otherwise Korean Windows may default to CP949 and crash on
+    # punctuation such as U+2014 before the scan even begins.
+    _force_utf8_stdio()
+
     # Reload before every backend action so editing .env while the GUI is open
     # is picked up without reinstalling or moving files.
     load_app_env()
@@ -76,6 +103,14 @@ def _env_self_test() -> int:
     return 0
 
 
+def _stdio_self_test() -> int:
+    _force_utf8_stdio()
+    # Deliberately include the exact character that failed on CP949 builds.
+    print("DAYLAW STDIO SELF TEST — UTF-8 OK")
+    print("한글 출력 테스트 OK")
+    return 0
+
+
 def main() -> int:
     if len(sys.argv) >= 2 and sys.argv[1] == "--self-test":
         import desktop_app_v4  # noqa: F401
@@ -84,6 +119,9 @@ def main() -> int:
 
     if len(sys.argv) >= 2 and sys.argv[1] == "--env-self-test":
         return _env_self_test()
+
+    if len(sys.argv) >= 2 and sys.argv[1] == "--stdio-self-test":
+        return _stdio_self_test()
 
     if len(sys.argv) >= 3 and sys.argv[1] == "--backend":
         return run_backend(sys.argv[2], sys.argv[3:])
