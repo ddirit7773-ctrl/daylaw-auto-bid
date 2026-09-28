@@ -48,6 +48,7 @@ ENV_PATH = load_app_env()
 BACKENDS = {
     "run_v2_scan": "run_v2_scan",
     "build_v2_delete_plan": "build_v2_delete_plan",
+    "approve_immediate_20": "approve_immediate_20",
     "execute_v2_delete": "execute_v2_delete",
     "query_account_stats": "query_account_stats",
     "restore_deleted_keyword": "restore_deleted_keyword",
@@ -94,7 +95,8 @@ def _stdio_self_test() -> int:
 
 def main() -> int:
     if len(sys.argv) >= 2 and sys.argv[1] == "--self-test":
-        import desktop_app_v6  # noqa: F401
+        import desktop_app_v7  # noqa: F401
+        import approve_immediate_20  # noqa: F401
         print("DAYLAW PACKAGED SELF TEST OK")
         return 0
 
@@ -120,9 +122,9 @@ def main() -> int:
     desktop_app_v3.ROOT_DIR = APP_ROOT
     desktop_app_v3.BACKUP_DIR = APP_ROOT / "data" / "backups"
 
-    from desktop_app_v6 import DesktopAppV6
+    from desktop_app_v7 import DesktopAppV7
 
-    app = DesktopAppV6()
+    app = DesktopAppV7()
     app.mainloop()
     return 0
 
