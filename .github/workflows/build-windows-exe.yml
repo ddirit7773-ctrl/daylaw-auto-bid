@@ -39,6 +39,9 @@ jobs:
           & $exe --self-test
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
+          & $exe --stdio-self-test
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
           @"
           NAVER_API_KEY=dummy_access_license
           NAVER_SECRET_KEY=dummy_secret
