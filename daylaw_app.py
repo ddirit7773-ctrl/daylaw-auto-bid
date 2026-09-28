@@ -20,14 +20,7 @@ os.environ["DAYLAW_APP_ROOT"] = str(APP_ROOT)
 
 
 def _force_utf8_stdio() -> None:
-    """Make packaged backend stdout/stderr deterministic on Korean Windows.
-
-    When the frozen GUI relaunches itself in backend mode, Windows can expose
-    stdout/stderr as CP949. Some of our status banners contain Unicode punctuation
-    such as an em dash, which then raises UnicodeEncodeError before any API work
-    starts. Reconfigure the current process streams to UTF-8 and replace only as
-    a final fallback so backend output can always be captured by the GUI.
-    """
+    """Make packaged backend stdout/stderr deterministic on Korean Windows."""
     os.environ["PYTHONIOENCODING"] = "utf-8"
     for name in ("stdout", "stderr"):
         stream = getattr(sys, name, None)
@@ -42,12 +35,7 @@ def _force_utf8_stdio() -> None:
 
 
 def load_app_env() -> Path:
-    """Load the portable sidecar .env from the same folder as the EXE.
-
-    python-dotenv's implicit discovery can point at PyInstaller's internal bundle
-    directory in a frozen app. Always using APP_ROOT makes the Windows portable
-    layout deterministic.
-    """
+    """Load the portable sidecar .env from the same folder as the EXE."""
     env_path = APP_ROOT / ".env"
     if env_path.exists():
         load_dotenv(dotenv_path=env_path, override=True)
@@ -67,13 +55,7 @@ BACKENDS = {
 
 
 def run_backend(name: str, argv: list[str]) -> int:
-    # Backend output is captured as UTF-8 by the GUI. Force the child process to
-    # emit UTF-8 too, otherwise Korean Windows may default to CP949 and crash on
-    # punctuation such as U+2014 before the scan even begins.
     _force_utf8_stdio()
-
-    # Reload before every backend action so editing .env while the GUI is open
-    # is picked up without reinstalling or moving files.
     load_app_env()
     module_name = BACKENDS.get(name)
     if not module_name:
@@ -105,7 +87,6 @@ def _env_self_test() -> int:
 
 def _stdio_self_test() -> int:
     _force_utf8_stdio()
-    # Deliberately include the exact character that failed on CP949 builds.
     print("DAYLAW STDIO SELF TEST — UTF-8 OK")
     print("한글 출력 테스트 OK")
     return 0
@@ -113,7 +94,7 @@ def _stdio_self_test() -> int:
 
 def main() -> int:
     if len(sys.argv) >= 2 and sys.argv[1] == "--self-test":
-        import desktop_app_v4  # noqa: F401
+        import desktop_app_v5  # noqa: F401
         print("DAYLAW PACKAGED SELF TEST OK")
         return 0
 
@@ -139,9 +120,9 @@ def main() -> int:
     desktop_app_v3.ROOT_DIR = APP_ROOT
     desktop_app_v3.BACKUP_DIR = APP_ROOT / "data" / "backups"
 
-    from desktop_app_v4 import DesktopAppV4
+    from desktop_app_v5 import DesktopAppV5
 
-    app = DesktopAppV4()
+    app = DesktopAppV5()
     app.mainloop()
     return 0
 
