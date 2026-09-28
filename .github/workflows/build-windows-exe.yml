@@ -24,7 +24,7 @@ jobs:
       - name: Compile check
         shell: pwsh
         run: |
-          python -m py_compile daylaw_app.py desktop_app.py desktop_app_v2.py desktop_app_v3.py desktop_app_v4.py restore_deleted_keyword.py query_account_stats.py execute_v2_delete.py src/keyword_cleaner/naver_api.py
+          python -m py_compile daylaw_app.py desktop_app.py desktop_app_v2.py desktop_app_v3.py desktop_app_v4.py desktop_app_v5.py desktop_app_v6.py restore_deleted_keyword.py query_account_stats.py execute_v2_delete.py run_v2_scan.py src/keyword_cleaner/naver_api.py src/keyword_cleaner/stats_v2.py
 
       - name: Build portable app
         shell: pwsh
