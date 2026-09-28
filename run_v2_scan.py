@@ -157,6 +157,15 @@ def _write_csv(rows: list[dict]) -> Path:
     return path
 
 
+def _is_silent_complete(stat) -> bool:
+    return bool(
+        stat is not None
+        and stat.complete
+        and (stat.impressions or 0) == 0
+        and (stat.clicks or 0) == 0
+    )
+
+
 def main() -> int:
     load_dotenv()
     policy = CleanerPolicy.load()
@@ -175,7 +184,6 @@ def main() -> int:
         ),
     )
 
-    # Current API scan uses direct complete-day windows, so keep them <= 90.
     for value in (
         policy.general_inactivity_days,
         policy.type_core_inactivity_days,
@@ -190,8 +198,9 @@ def main() -> int:
     client = NaverSearchAdsClient(NaverConfig.from_env())
 
     print("=" * 78)
-    print("DAYLAW KEYWORD CLEANER V2 — FULL SAFE SCAN / NO DELETION")
+    print("DAYLAW KEYWORD CLEANER V2 — SAFE FAST SCAN / NO DELETION")
     print("=" * 78)
+    print("Safe-fast mode: bounded parallel read-only stats + conditional long-window lookup")
     print("[1/6] Campaigns and ad groups loading...")
     campaigns = client.get_campaigns()
 
@@ -253,11 +262,8 @@ def main() -> int:
     print(f"Cleanup needed   : {cleanup_needed}")
     print(f"Target removals  : {cleanup_target_count:,}")
 
-    # Only keywords that are old enough, exposure-eligible, and non-permanent
-    # need activity API calls. Everything else is decided before stats.
     eligible_general: list[str] = []
     eligible_type: list[str] = []
-    eligible_all: list[str] = []
     for item in collected:
         if item["tier"] == "PERMANENT":
             continue
@@ -273,7 +279,6 @@ def main() -> int:
             continue
         if item["exposure_eligible"] is not True:
             continue
-        eligible_all.append(item["keyword_id"])
         if item["tier"] == "TYPE_CORE":
             eligible_type.append(item["keyword_id"])
         else:
@@ -306,13 +311,29 @@ def main() -> int:
         until=type_until,
     )
 
+    # Safe optimization: only keywords that are completely silent in their
+    # inactivity window need the longer click-protection lookup. Any keyword
+    # with recent clicks is KEEP; any keyword with impressions is WATCH. Both
+    # are already non-deletable, so the longer request cannot change a delete
+    # decision for them.
+    click_check_ids: list[str] = []
+    for keyword_id in eligible_general:
+        if _is_silent_complete(general_stats.get(keyword_id)):
+            click_check_ids.append(keyword_id)
+    for keyword_id in eligible_type:
+        if _is_silent_complete(type_stats.get(keyword_id)):
+            click_check_ids.append(keyword_id)
+
+    inactivity_eligible_total = len(eligible_general) + len(eligible_type)
+    skipped_long_click = max(inactivity_eligible_total - len(click_check_ids), 0)
     print(
         f"[4/6] Click protection {policy.click_protection_days}d: "
-        f"{len(eligible_all):,} keywords..."
+        f"{len(click_check_ids):,} silent candidates... "
+        f"(skipped {skipped_long_click:,} already non-deletable/incomplete)"
     )
     click_stats = get_verified_keyword_stats(
         client,
-        eligible_all,
+        click_check_ids,
         since=click_since,
         until=click_until,
     )
@@ -351,16 +372,27 @@ def main() -> int:
 
             if click_stat is None:
                 click_count = None
-                click_source = "not_required"
+                click_source = "not_required_safe_skip"
                 click_complete = False
             else:
                 click_count = click_stat.clicks
                 click_source = click_stat.source
                 click_complete = click_stat.complete
 
-            # Stats completeness only matters after the earlier permanent/new/
-            # exposure checks. classify_snapshot applies those checks first.
-            stats_complete = inactivity_complete and click_complete
+            silent_inactivity = bool(
+                inactivity_complete
+                and inactivity_imp is not None
+                and inactivity_clk is not None
+                and (inactivity_imp or 0) == 0
+                and (inactivity_clk or 0) == 0
+            )
+            # For an already active keyword, the inactivity window is enough to
+            # produce KEEP/WATCH safely. For a silent keyword, the longer click
+            # window remains mandatory.
+            stats_complete = inactivity_complete and (
+                click_complete if silent_inactivity else True
+            )
+
             snapshot = ActivitySnapshot(
                 age_days=item["age_days"],
                 inactivity_impressions=inactivity_imp,
