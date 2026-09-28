@@ -24,7 +24,57 @@ jobs:
       - name: Compile check
         shell: pwsh
         run: |
-          python -m py_compile daylaw_app.py desktop_app.py desktop_app_v2.py desktop_app_v3.py desktop_app_v4.py desktop_app_v5.py desktop_app_v6.py restore_deleted_keyword.py query_account_stats.py execute_v2_delete.py run_v2_scan.py src/keyword_cleaner/naver_api.py src/keyword_cleaner/stats_v2.py
+          python -m py_compile daylaw_app.py desktop_app.py desktop_app_v2.py desktop_app_v3.py desktop_app_v4.py desktop_app_v5.py desktop_app_v6.py restore_deleted_keyword.py query_account_stats.py execute_v2_delete.py run_v2_scan.py src/keyword_cleaner/naver_api.py src/keyword_cleaner/stats_v2.py src/keyword_cleaner/policy_v2.py
+
+      - name: Safe-fast policy self test
+        shell: pwsh
+        run: |
+          @'
+          from src.keyword_cleaner.policy_v2 import ActivitySnapshot, CleanerPolicy, classify_snapshot
+
+          policy = CleanerPolicy.load()
+          common = dict(
+              adgroup_name="테스트업체",
+              keyword="테스트업체일반키워드",
+              policy=policy,
+          )
+
+          # Recent impressions already force WATCH. The longer click lookup may
+          # be skipped and must never make the keyword deletable.
+          active = ActivitySnapshot(
+              age_days=max(policy.general_inactivity_days, policy.general_protection_days) + 10,
+              inactivity_impressions=3,
+              inactivity_clicks=0,
+              click_window_clicks=None,
+              exposure_eligible=True,
+              stats_complete=True,
+          )
+          assert classify_snapshot(snapshot=active, **common).status == "WATCH"
+
+          # A silent keyword without the longer click-protection result must
+          # stay DATA_INSUFFICIENT, never DELETE_PENDING.
+          missing_long_window = ActivitySnapshot(
+              age_days=max(policy.general_inactivity_days, policy.general_protection_days) + 10,
+              inactivity_impressions=0,
+              inactivity_clicks=0,
+              click_window_clicks=None,
+              exposure_eligible=True,
+              stats_complete=False,
+          )
+          assert classify_snapshot(snapshot=missing_long_window, **common).status == "DATA_INSUFFICIENT"
+
+          # Only fully verified silence may reach DELETE_PENDING.
+          fully_silent = ActivitySnapshot(
+              age_days=max(policy.general_inactivity_days, policy.general_protection_days) + 10,
+              inactivity_impressions=0,
+              inactivity_clicks=0,
+              click_window_clicks=0,
+              exposure_eligible=True,
+              stats_complete=True,
+          )
+          assert classify_snapshot(snapshot=fully_silent, **common).status == "DELETE_PENDING"
+          print("SAFE FAST POLICY TEST OK")
+          '@ | python -
 
       - name: Build portable app
         shell: pwsh
