@@ -19,6 +19,7 @@ hiddenimports = [
     "desktop_app_v2",
     "desktop_app_v3",
     "desktop_app_v4",
+    "desktop_app_v5",
     "tzdata",
     "tzdata.zoneinfo",
 ]
