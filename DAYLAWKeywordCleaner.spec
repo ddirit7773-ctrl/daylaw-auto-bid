@@ -12,6 +12,7 @@ datas += collect_data_files("tzdata")
 hiddenimports = [
     "run_v2_scan",
     "build_v2_delete_plan",
+    "approve_immediate_20",
     "execute_v2_delete",
     "query_account_stats",
     "restore_deleted_keyword",
@@ -21,6 +22,7 @@ hiddenimports = [
     "desktop_app_v4",
     "desktop_app_v5",
     "desktop_app_v6",
+    "desktop_app_v7",
     "tzdata",
     "tzdata.zoneinfo",
 ]
