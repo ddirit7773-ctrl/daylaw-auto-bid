@@ -105,7 +105,6 @@ class CleanerPolicy:
             )
 
     def with_updates(self, **changes: object) -> "CleanerPolicy":
-        """Return a validated copy after settings-screen changes."""
         updated = replace(self, **changes)
         updated.validate()
         return updated
@@ -145,7 +144,6 @@ class CleanerPolicy:
         }
 
     def save(self, path: Path = DEFAULT_POLICY_PATH) -> None:
-        """Persist settings atomically so the future desktop UI can edit them."""
         self.validate()
         path.parent.mkdir(parents=True, exist_ok=True)
         temp = path.with_suffix(path.suffix + ".tmp")
@@ -270,9 +268,6 @@ def classify_snapshot(
             True,
         )
 
-    # A keyword cannot truthfully satisfy a 30d/45d inactivity rule until it
-    # has existed for that full observation window. This guard prevents, for
-    # example, a 21-day-old GENERAL keyword from being treated as 30d inactive.
     if snapshot.age_days < inactivity_days:
         return PolicyDecision(
             "PROTECTED_NEW",
@@ -289,32 +284,17 @@ def classify_snapshot(
             False,
         )
 
-    if policy.require_complete_stats and not snapshot.stats_complete:
+    # Safe-fast rule: the longer click-protection lookup is only required when
+    # the inactivity window is completely silent. If the recent inactivity
+    # window already contains a click, KEEP is certain. If it contains only
+    # impressions, WATCH is already non-deletable. Skipping the longer click
+    # lookup in those two cases cannot make a keyword more deletable.
+    if snapshot.inactivity_impressions is None or snapshot.inactivity_clicks is None:
         return PolicyDecision(
             "DATA_INSUFFICIENT",
             tier,
-            "stats_incomplete",
+            "inactivity_window_missing",
             False,
-        )
-
-    if (
-        snapshot.inactivity_impressions is None
-        or snapshot.inactivity_clicks is None
-        or snapshot.click_window_clicks is None
-    ):
-        return PolicyDecision(
-            "DATA_INSUFFICIENT",
-            tier,
-            "required_activity_window_missing",
-            False,
-        )
-
-    if snapshot.click_window_clicks > 0:
-        return PolicyDecision(
-            "KEEP",
-            tier,
-            f"clicks_within_{policy.click_protection_days}d={snapshot.click_window_clicks}",
-            True,
         )
 
     if snapshot.inactivity_clicks > 0:
@@ -331,6 +311,33 @@ def classify_snapshot(
             tier,
             f"recent_impressions={snapshot.inactivity_impressions},clicks=0",
             False,
+        )
+
+    # From here onward the inactivity window is 0 impressions / 0 clicks, so
+    # the longer click-protection window becomes mandatory before deletion can
+    # even reach DELETE_PENDING.
+    if policy.require_complete_stats and not snapshot.stats_complete:
+        return PolicyDecision(
+            "DATA_INSUFFICIENT",
+            tier,
+            "stats_incomplete",
+            False,
+        )
+
+    if snapshot.click_window_clicks is None:
+        return PolicyDecision(
+            "DATA_INSUFFICIENT",
+            tier,
+            "click_protection_window_missing",
+            False,
+        )
+
+    if snapshot.click_window_clicks > 0:
+        return PolicyDecision(
+            "KEEP",
+            tier,
+            f"clicks_within_{policy.click_protection_days}d={snapshot.click_window_clicks}",
+            True,
         )
 
     return PolicyDecision(
