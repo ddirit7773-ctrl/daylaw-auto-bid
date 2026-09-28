@@ -39,6 +39,20 @@ def _chunks(values: Sequence[str], size: int) -> list[Sequence[str]]:
     return [values[index : index + size] for index in range(0, len(values), size)]
 
 
+def _emit_batch_progress(done: int, total: int) -> None:
+    """Emit a machine-readable line for the packaged GUI.
+
+    The normal CLI output stays readable, while DesktopAppV6 can turn this into
+    a percentage and ETA.  We intentionally report only ~40 times per stats
+    query so a 90k-keyword account does not flood the UI thread.
+    """
+    if total <= 0:
+        return
+    report_every = max(1, total // 40)
+    if done == 1 or done == total or done % report_every == 0:
+        print(f"@@STATS_PROGRESS|{done}|{total}", flush=True)
+
+
 def get_verified_keyword_stats(
     client: NaverSearchAdsClient,
     keyword_ids: Sequence[str],
@@ -50,14 +64,10 @@ def get_verified_keyword_stats(
     """Fetch keyword stats without converting request failures into zero.
 
     Naver multi-id /stats accepts ids as a repeated/list query parameter, not
-    as one JSON-encoded string. The earlier V2 batch error came from encoding
-    the entire list into one string, which the API interpreted as an invalid
-    single id.
+    as one JSON-encoded string. A failed batch is never treated as zero.
 
-    A failed batch is never treated as zero. A successful batch may omit true
-    zero rows; because the ids were freshly fetched from /ncc/keywords and this
-    behavior was cross-checked with singular requests, omitted ids in a
-    successful batch are treated as confirmed 0/0 observations.
+    Progress is emitted as ``@@STATS_PROGRESS|done_batches|total_batches`` so
+    the Windows desktop app can show a live progress bar and estimated time.
     """
     clean_ids = [str(value).strip() for value in keyword_ids if str(value).strip()]
     result: dict[str, VerifiedKeywordStat] = {}
@@ -67,8 +77,10 @@ def get_verified_keyword_stats(
 
     fields = json.dumps(["impCnt", "clkCnt"], separators=(",", ":"))
     time_range = json.dumps({"since": since, "until": until}, separators=(",", ":"))
+    batches = _chunks(clean_ids, batch_size)
+    total_batches = len(batches)
 
-    for batch in _chunks(clean_ids, batch_size):
+    for batch_index, batch in enumerate(batches, start=1):
         params = {
             "ids": list(batch),
             "fields": fields,
@@ -87,6 +99,7 @@ def get_verified_keyword_stats(
                     source="batch_error",
                     error=str(exc),
                 )
+            _emit_batch_progress(batch_index, total_batches)
             continue
 
         rows = _parse_rows(payload)
@@ -118,6 +131,7 @@ def get_verified_keyword_stats(
                     complete=True,
                     source="multi_omitted_zero",
                 )
+        _emit_batch_progress(batch_index, total_batches)
 
     return result
 
