@@ -24,7 +24,7 @@ jobs:
       - name: Compile check
         shell: pwsh
         run: |
-          python -m py_compile daylaw_app.py daylaw_app_v12_hotfix.py desktop_app.py desktop_app_v2.py desktop_app_v3.py desktop_app_v4.py desktop_app_v5.py desktop_app_v6.py desktop_app_v7.py approve_immediate_20.py approve_immediate_partial.py restore_deleted_keyword.py query_account_stats.py execute_v2_delete.py run_v2_scan.py src/keyword_cleaner/naver_api.py src/keyword_cleaner/stats_v2.py src/keyword_cleaner/policy_v2.py
+          python -m py_compile daylaw_app.py daylaw_app_v12_hotfix.py desktop_app.py desktop_app_v2.py desktop_app_v3.py desktop_app_v4.py desktop_app_v5.py desktop_app_v6.py desktop_app_v7.py approve_immediate_20.py approve_immediate_partial.py restore_deleted_keyword.py query_account_stats.py execute_v2_delete.py run_v2_scan.py src/keyword_cleaner/naver_api.py src/keyword_cleaner/stats_v2.py src/keyword_cleaner/policy_v2.py src/keyword_cleaner/live_safety.py src/keyword_cleaner/lifecycle_store.py
 
       - name: Safe-fast policy self test
         shell: pwsh
@@ -71,6 +71,47 @@ jobs:
           print("SAFE FAST POLICY TEST OK")
           '@ | python -
 
+      - name: Pre-delete archive journal self test
+        shell: pwsh
+        run: |
+          @'
+          import sqlite3
+          import tempfile
+          from pathlib import Path
+          from src.keyword_cleaner.lifecycle_store import LifecycleStore
+
+          with tempfile.TemporaryDirectory() as temp:
+              db = Path(temp) / "journal.sqlite3"
+              store = LifecycleStore(db)
+              archive_id = store.prepare_keyword_archive(
+                  identity_key="c|g|keyword",
+                  keyword_id="k1",
+                  campaign_id="c",
+                  adgroup_id="g",
+                  keyword="테스트키워드",
+                  tier="GENERAL",
+                  delete_reason="SELF_TEST",
+                  payload={"keyword_before_delete": {"keyword": "테스트키워드"}},
+              )
+              row = store.conn.execute(
+                  "SELECT delete_status, payload_json FROM keyword_archive WHERE archive_id = ?",
+                  (archive_id,),
+              ).fetchone()
+              assert row["delete_status"] == "PREPARED"
+              assert "테스트키워드" in row["payload_json"]
+              store.mark_archive_delete_requested(archive_id)
+              store.mark_archive_delete_api_ok(archive_id)
+              store.mark_archive_verified(archive_id, gone=True)
+              row = store.conn.execute(
+                  "SELECT delete_status, verified_at FROM keyword_archive WHERE archive_id = ?",
+                  (archive_id,),
+              ).fetchone()
+              assert row["delete_status"] == "DELETED_VERIFIED"
+              assert row["verified_at"]
+              store.close()
+          print("PRE-DELETE ARCHIVE JOURNAL TEST OK")
+          '@ | python -
+
       - name: Build portable app
         shell: pwsh
         run: |
@@ -107,6 +148,7 @@ jobs:
           New-Item -ItemType Directory -Force -Path "$root/data/backups" | Out-Null
           New-Item -ItemType Directory -Force -Path "$root/data/stats" | Out-Null
           New-Item -ItemType Directory -Force -Path "$root/data/state" | Out-Null
+          New-Item -ItemType Directory -Force -Path "$root/data/delete_audit" | Out-Null
           New-Item -ItemType Directory -Force -Path "$root/logs" | Out-Null
           if (Test-Path ".env.example") { Copy-Item ".env.example" "$root/.env.example" -Force }
           Compress-Archive -Path "$root/*" -DestinationPath "DAYLAW-Keyword-Cleaner-Windows.zip" -Force
