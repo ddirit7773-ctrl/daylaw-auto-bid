@@ -16,6 +16,7 @@ hiddenimports = [
     "approve_immediate_partial",
     "execute_v2_delete",
     "restricted_cleanup",
+    "restricted_cleanup_v2",
     "query_account_stats",
     "restore_deleted_keyword",
     "desktop_app",
