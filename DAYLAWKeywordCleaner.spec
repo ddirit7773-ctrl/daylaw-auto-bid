@@ -15,6 +15,7 @@ hiddenimports = [
     "approve_immediate_20",
     "approve_immediate_partial",
     "execute_v2_delete",
+    "restricted_cleanup",
     "query_account_stats",
     "restore_deleted_keyword",
     "desktop_app",
@@ -24,6 +25,7 @@ hiddenimports = [
     "desktop_app_v5",
     "desktop_app_v6",
     "desktop_app_v7",
+    "desktop_app_v8",
     "tzdata",
     "tzdata.zoneinfo",
 ]
