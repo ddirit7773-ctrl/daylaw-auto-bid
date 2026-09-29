@@ -2,19 +2,22 @@ from __future__ import annotations
 
 import argparse
 import csv
-import json
 import math
 from collections import Counter, defaultdict
-from datetime import datetime, timedelta
+from datetime import datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
 from dotenv import load_dotenv
 
 from src.keyword_cleaner.lifecycle_store import LifecycleStore
+from src.keyword_cleaner.live_safety import (
+    count_account_keywords_live,
+    evaluate_general_delete_gate,
+    stats_range,
+)
 from src.keyword_cleaner.naver_api import NaverConfig, NaverSearchAdsClient, NaverSearchAdsError
-from src.keyword_cleaner.policy_v2 import CleanerPolicy, keyword_tier, normalize
-from src.keyword_cleaner.stats_v2 import get_singular_verified_keyword_stat
+from src.keyword_cleaner.policy_v2 import CleanerPolicy, normalize
 
 
 KST = ZoneInfo("Asia/Seoul")
@@ -37,6 +40,15 @@ def read_csv(path: Path) -> list[dict[str, str]]:
         return list(csv.DictReader(fp))
 
 
+def write_csv(path: Path, rows: list[dict[str, object]]) -> None:
+    if not rows:
+        raise SystemExit(f"Refusing to write empty CSV: {path}")
+    with path.open("w", encoding="utf-8-sig", newline="") as fp:
+        writer = csv.DictWriter(fp, fieldnames=list(rows[0].keys()), extrasaction="ignore")
+        writer.writeheader()
+        writer.writerows(rows)
+
+
 def load_lines(path: Path) -> list[str]:
     if not path.exists():
         return []
@@ -48,53 +60,14 @@ def load_lines(path: Path) -> list[str]:
     return out
 
 
-def stats_range(days: int) -> tuple[str, str]:
-    today = datetime.now(KST).date()
-    until = today - timedelta(days=1)
-    since = until - timedelta(days=days - 1)
-    return since.isoformat(), until.isoformat()
-
-
-def as_int(value: object, default: int = 0) -> int:
-    try:
-        return int(float(value or default))
-    except (TypeError, ValueError):
-        return default
-
-
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Approval-gated V2 keyword delete executor. Dry-run by default."
     )
-    parser.add_argument(
-        "--delete",
-        action="store_true",
-        help="Actually delete after all safety gates pass.",
-    )
-    parser.add_argument(
-        "--confirm",
-        default="",
-        help="Live deletion requires exactly: --confirm DELETE",
-    )
-    parser.add_argument(
-        "--max-delete",
-        type=int,
-        default=None,
-        help="Maximum keywords for this run. Default is first-test batch from policy.",
-    )
+    parser.add_argument("--delete", action="store_true")
+    parser.add_argument("--confirm", default="")
+    parser.add_argument("--max-delete", type=int, default=None)
     return parser.parse_args()
-
-
-def exposure_ok(row: dict) -> bool:
-    if row.get("userLock") is True:
-        return False
-    if str(row.get("status", "")).strip().upper() != "ELIGIBLE":
-        return False
-    return True
-
-
-def keyword_exposure_ok(row: dict) -> bool:
-    return exposure_ok(row) and str(row.get("inspectStatus", "")).strip().upper() == "APPROVED"
 
 
 def write_manifest(path: Path, rows: list[dict[str, object]]) -> None:
@@ -113,8 +86,11 @@ def write_manifest(path: Path, rows: list[dict[str, object]]) -> None:
         "inactivity_impressions",
         "inactivity_clicks",
         "click_window_clicks",
+        "history_impressions",
+        "history_clicks",
         "gate_result",
         "gate_reason",
+        "archive_id",
         "delete_result",
         "verify_result",
     ]
@@ -124,12 +100,50 @@ def write_manifest(path: Path, rows: list[dict[str, object]]) -> None:
         writer.writerows(rows)
 
 
+def persist_live_holds(
+    *,
+    scan_rows: list[dict[str, str]],
+    plan_rows: list[dict[str, str]],
+    blocked_reason_by_id: dict[str, str],
+) -> tuple[Path, Path]:
+    """Demote final-gate failures so they do not repeatedly block the next batch."""
+    stamp = datetime.now(KST).strftime("%Y%m%d_%H%M%S")
+    new_scan_rows: list[dict[str, object]] = []
+    for row in scan_rows:
+        out = dict(row)
+        kid = row.get("keyword_id", "")
+        if kid in blocked_reason_by_id and row.get("status") == "DELETE_APPROVED":
+            out["status"] = "WATCH"
+            out["reason"] = "live_delete_hold:" + blocked_reason_by_id[kid]
+        new_scan_rows.append(out)
+
+    new_plan_rows: list[dict[str, object]] = []
+    for row in plan_rows:
+        out = dict(row)
+        kid = row.get("keyword_id", "")
+        if kid in blocked_reason_by_id:
+            out["status"] = "WATCH"
+            out["plan_action"] = "LIVE_DELETE_HOLD"
+            out["plan_reason"] = (
+                str(out.get("plan_reason", ""))
+                + "; final live delete hold: "
+                + blocked_reason_by_id[kid]
+            )
+        new_plan_rows.append(out)
+
+    scan_out = BACKUP_DIR / f"v2_scan_{stamp}.csv"
+    plan_out = BACKUP_DIR / f"v2_target_delete_plan_{stamp}.csv"
+    write_csv(scan_out, new_scan_rows)
+    write_csv(plan_out, new_plan_rows)
+    return scan_out, plan_out
+
+
 def main() -> int:
     args = parse_args()
     load_dotenv()
     policy = CleanerPolicy.load()
 
-    max_delete = policy.first_test_batch if args.max_delete is None else args.max_delete
+    max_delete = policy.first_test_batch if args.max_delete is None else int(args.max_delete)
     if max_delete < 1:
         raise SystemExit("--max-delete must be at least 1")
     if max_delete > policy.first_test_batch:
@@ -148,19 +162,15 @@ def main() -> int:
     if scan_age_minutes > MAX_SCAN_AGE_MINUTES:
         raise SystemExit(
             f"Latest V2 scan is {scan_age_minutes:.0f} minutes old. "
-            "Run python run_v2_scan.py and rebuild the delete plan first."
+            "Run V2 scan and rebuild the delete plan first."
         )
     if plan_path.stat().st_mtime < scan_path.stat().st_mtime:
-        raise SystemExit(
-            "Delete plan is older than the latest V2 scan. Run python build_v2_delete_plan.py first."
-        )
+        raise SystemExit("Delete plan is older than the latest V2 scan. Rebuild it first.")
 
     scan_rows = read_csv(scan_path)
     plan_rows = read_csv(plan_path)
     scan_by_id = {row.get("keyword_id", ""): row for row in scan_rows if row.get("keyword_id")}
 
-    # The plan may contain pending rows for capacity planning, but execution may
-    # only touch rows that the latest scan has explicitly promoted to APPROVED.
     approved_plan: list[dict[str, str]] = []
     for row in plan_rows:
         kid = row.get("keyword_id", "")
@@ -178,7 +188,7 @@ def main() -> int:
     selected = approved_plan[:max_delete]
 
     print("=" * 76)
-    print("V2 SAFE DELETE EXECUTOR")
+    print("V2 SAFE DELETE EXECUTOR — COMMON 30D/60D/90D FINAL GATE")
     print("=" * 76)
     print(f"Mode                    : {'LIVE DELETE' if live else 'DRY RUN'}")
     print(f"Latest scan             : {scan_path}")
@@ -192,21 +202,8 @@ def main() -> int:
     if len(scan_rows) <= policy.cleanup_stop:
         print("[SAFE STOP] Account is already at/below cleanup stop. Nothing to do.")
         return 0
-
     if not selected:
-        print("")
-        print(
-            f"[SAFE STOP] No DELETE_APPROVED rows are executable yet. "
-            f"The {policy.pending_recheck_days}-day recheck gate is working."
-        )
-        print("Nothing was deleted or modified.")
-        return 0
-
-    # Never delete more than needed to reach the stop threshold.
-    remaining_to_stop = max(len(scan_rows) - policy.cleanup_stop, 0)
-    selected = selected[:remaining_to_stop]
-    if not selected:
-        print("[SAFE STOP] No removal is needed to reach cleanup stop.")
+        print("[SAFE STOP] No DELETE_APPROVED rows are executable yet.")
         return 0
 
     manual_permanent_keywords = load_lines(Path("config/protected_keywords.txt"))
@@ -219,9 +216,6 @@ def main() -> int:
     )
 
     client = NaverSearchAdsClient(NaverConfig.from_env(), min_interval_seconds=0.20)
-
-    # Fresh parent-state maps. A campaign/ad group turned off since the scan
-    # blocks deletion instead of turning zero activity into a false signal.
     campaigns = {str(row.get("nccCampaignId", "")): row for row in client.get_campaigns()}
     needed_campaign_ids = {row.get("campaign_id", "") for row in selected}
     adgroups: dict[str, dict] = {}
@@ -231,10 +225,7 @@ def main() -> int:
         for group in client.get_adgroups(campaign_id):
             adgroups[str(group.get("nccAdgroupId", ""))] = group
 
-    inactivity_since, inactivity_until = stats_range(policy.general_inactivity_days)
-    click_since, click_until = stats_range(policy.click_protection_days)
-
-    # Snapshot current group sizes and enforce the same group guard again.
+    # Conservative group snapshot before expensive per-keyword checks.
     selected_by_group: Counter[str] = Counter(row.get("adgroup_id", "") for row in selected)
     current_group_keywords: dict[str, list[dict]] = {}
     for adgroup_id in selected_by_group:
@@ -242,111 +233,57 @@ def main() -> int:
         total = len(current_group_keywords[adgroup_id])
         planned = selected_by_group[adgroup_id]
         if planned > math.floor(total * PER_GROUP_DELETE_CAP):
-            raise SystemExit(
-                f"[SAFE STOP] Group {adgroup_id} would exceed {int(PER_GROUP_DELETE_CAP*100)}% delete cap."
-            )
+            raise SystemExit(f"[SAFE STOP] Group {adgroup_id} would exceed 50% delete cap.")
         if total - planned < MIN_GROUP_SURVIVORS:
-            raise SystemExit(
-                f"[SAFE STOP] Group {adgroup_id} would fall below {MIN_GROUP_SURVIVORS} survivors."
-            )
+            raise SystemExit(f"[SAFE STOP] Group {adgroup_id} would fall below 4 survivors.")
 
     audit_rows: list[dict[str, object]] = []
     ready: list[tuple[dict[str, str], dict]] = []
+    blocked_reason_by_id: dict[str, str] = {}
     checked_at = datetime.now(KST).isoformat()
 
-    for plan in selected:
+    for index, plan in enumerate(selected, start=1):
         kid = plan.get("keyword_id", "")
-        audit: dict[str, object] = {
-            "checked_at": checked_at,
-            "campaign_name": plan.get("campaign_name", ""),
-            "campaign_id": plan.get("campaign_id", ""),
-            "adgroup_name": plan.get("adgroup_name", ""),
-            "adgroup_id": plan.get("adgroup_id", ""),
-            "keyword": plan.get("keyword", ""),
-            "keyword_id": kid,
-            "tier": plan.get("tier", ""),
-            "plan_status": scan_by_id.get(kid, {}).get("status", ""),
-            "gate_result": "BLOCK",
-            "gate_reason": "",
-            "delete_result": "NOT_ATTEMPTED",
-            "verify_result": "NOT_ATTEMPTED",
-        }
-
-        try:
-            current = client.get_keyword(kid)
-        except NaverSearchAdsError as exc:
-            audit["gate_reason"] = f"keyword_lookup_failed:{exc}"
-            audit_rows.append(audit)
-            continue
-
-        audit["current_status"] = current.get("status")
-        audit["current_inspect_status"] = current.get("inspectStatus")
-
-        if normalize(str(current.get("keyword", ""))) != normalize(plan.get("keyword", "")):
-            audit["gate_reason"] = "keyword_text_changed"
-            audit_rows.append(audit)
-            continue
-        if str(current.get("nccAdgroupId", "")) != plan.get("adgroup_id", ""):
-            audit["gate_reason"] = "adgroup_changed"
-            audit_rows.append(audit)
-            continue
-
-        campaign = campaigns.get(plan.get("campaign_id", ""))
-        adgroup = adgroups.get(plan.get("adgroup_id", ""))
-        if not campaign or not adgroup:
-            audit["gate_reason"] = "parent_not_found"
-            audit_rows.append(audit)
-            continue
-        if not exposure_ok(campaign) or not exposure_ok(adgroup) or not keyword_exposure_ok(current):
-            audit["gate_reason"] = "current_exposure_not_eligible"
-            audit_rows.append(audit)
-            continue
-
-        current_tier, tier_reason = keyword_tier(
-            adgroup_name=str(adgroup.get("name", "")),
-            keyword=str(current.get("keyword", "")),
+        print(f"@@IMMEDIATE_PROGRESS|{index}|{len(selected)}", flush=True)
+        gate = evaluate_general_delete_gate(
+            client=client,
+            plan=plan,
             policy=policy,
+            campaigns=campaigns,
+            adgroups=adgroups,
             manual_permanent_keywords=manual_permanent_keywords,
             manual_type_core_keywords=manual_type_core_keywords,
         )
-        if current_tier != "GENERAL":
-            audit["gate_reason"] = f"tier_changed:{current_tier}:{tier_reason}"
-            audit_rows.append(audit)
-            continue
-
-        recent = get_singular_verified_keyword_stat(
-            client,
-            kid,
-            since=inactivity_since,
-            until=inactivity_until,
+        current = gate.current_keyword or {}
+        audit_rows.append(
+            {
+                "checked_at": checked_at,
+                "campaign_name": plan.get("campaign_name", ""),
+                "campaign_id": plan.get("campaign_id", ""),
+                "adgroup_name": plan.get("adgroup_name", ""),
+                "adgroup_id": plan.get("adgroup_id", ""),
+                "keyword": plan.get("keyword", ""),
+                "keyword_id": kid,
+                "tier": plan.get("tier", ""),
+                "plan_status": scan_by_id.get(kid, {}).get("status", ""),
+                "current_status": current.get("status", ""),
+                "current_inspect_status": current.get("inspectStatus", ""),
+                "inactivity_impressions": gate.inactivity_impressions,
+                "inactivity_clicks": gate.inactivity_clicks,
+                "click_window_clicks": gate.click_window_clicks,
+                "history_impressions": gate.history_impressions,
+                "history_clicks": gate.history_clicks,
+                "gate_result": "READY" if gate.ready else "BLOCK",
+                "gate_reason": gate.reason,
+                "archive_id": "",
+                "delete_result": "NOT_ATTEMPTED",
+                "verify_result": "NOT_ATTEMPTED",
+            }
         )
-        clicks = get_singular_verified_keyword_stat(
-            client,
-            kid,
-            since=click_since,
-            until=click_until,
-        )
-        audit["inactivity_impressions"] = recent.impressions
-        audit["inactivity_clicks"] = recent.clicks
-        audit["click_window_clicks"] = clicks.clicks
-
-        if not recent.complete or not clicks.complete:
-            audit["gate_reason"] = "stats_revalidation_incomplete"
-            audit_rows.append(audit)
-            continue
-        if (recent.impressions or 0) != 0 or (recent.clicks or 0) != 0:
-            audit["gate_reason"] = "recent_activity_detected"
-            audit_rows.append(audit)
-            continue
-        if (clicks.clicks or 0) != 0:
-            audit["gate_reason"] = "click_protection_activity_detected"
-            audit_rows.append(audit)
-            continue
-
-        audit["gate_result"] = "READY"
-        audit["gate_reason"] = "all_live_gates_passed"
-        audit_rows.append(audit)
-        ready.append((plan, current))
+        if gate.ready and gate.current_keyword is not None:
+            ready.append((plan, gate.current_keyword))
+        else:
+            blocked_reason_by_id[kid] = gate.reason
 
     AUDIT_DIR.mkdir(parents=True, exist_ok=True)
     stamp = datetime.now(KST).strftime("%Y%m%d_%H%M%S")
@@ -354,24 +291,74 @@ def main() -> int:
     write_manifest(manifest_path, audit_rows)
 
     print("")
-    print(f"Live-gate READY         : {len(ready):,}")
-    print(f"Blocked at live gate    : {len(selected) - len(ready):,}")
+    print(f"Final gate READY        : {len(ready):,}")
+    print(f"Final gate HOLD         : {len(blocked_reason_by_id):,}")
     print(f"Pre-delete manifest     : {manifest_path}")
 
     if not live:
-        print("[DRY RUN] Nothing was deleted. Use live flags only after reviewing the manifest.")
+        print("[DRY RUN] Nothing was deleted or modified.")
         return 0
 
-    if len(ready) != len(selected):
-        print("[SAFE STOP] At least one selected keyword failed a live gate. Nothing will be deleted.")
+    # Final-gate failures are held out of subsequent batches instead of blocking
+    # independently safe rows. A future full scan may reconsider them.
+    if blocked_reason_by_id:
+        hold_scan, hold_plan = persist_live_holds(
+            scan_rows=scan_rows,
+            plan_rows=plan_rows,
+            blocked_reason_by_id=blocked_reason_by_id,
+        )
+        print(f"Held-state scan         : {hold_scan}")
+        print(f"Held-state plan         : {hold_plan}")
+
+    if not ready:
+        print("[SAFE STOP] No keyword passed the final 30d/60d/90d gate. Nothing deleted.")
         return 2
+
+    # Real-time account floor guard. We deliberately recount the account from
+    # Naver immediately before destructive requests. Any read failure aborts.
+    print("[LIVE FLOOR] Counting current account keywords before deletion...", flush=True)
+    live_keyword_count = count_account_keywords_live(client)
+    print(f"[LIVE FLOOR] Current live keywords: {live_keyword_count:,}")
+    if live_keyword_count <= policy.cleanup_stop:
+        print("[SAFE STOP] Live account is already at/below cleanup stop. Nothing deleted.")
+        return 0
+
+    allowable = max(live_keyword_count - policy.cleanup_stop, 0)
+    if len(ready) > allowable:
+        ready = ready[:allowable]
+        print(
+            f"[LIVE FLOOR] Batch trimmed to {len(ready):,} so the account cannot cross "
+            f"below {policy.cleanup_stop:,}."
+        )
+    if not ready:
+        print("[SAFE STOP] Live floor leaves no safe deletion capacity.")
+        return 0
+
+    # Re-apply group guard to the actual READY subset.
+    ready_by_group: Counter[str] = Counter(plan.get("adgroup_id", "") for plan, _ in ready)
+    for adgroup_id, planned in ready_by_group.items():
+        total = len(current_group_keywords.get(adgroup_id) or client.get_keywords(adgroup_id))
+        if planned > math.floor(total * PER_GROUP_DELETE_CAP):
+            raise SystemExit(f"[SAFE STOP] READY subset exceeds 50% delete cap for {adgroup_id}.")
+        if total - planned < MIN_GROUP_SURVIVORS:
+            raise SystemExit(f"[SAFE STOP] READY subset would leave fewer than 4 in {adgroup_id}.")
+
+    inactivity_since, inactivity_until = stats_range(policy.general_inactivity_days)
+    click_since, click_until = stats_range(policy.click_protection_days)
+    history_since, history_until = stats_range(policy.reference_history_days)
 
     store = LifecycleStore()
     deleted_ids: list[str] = []
     deleted_by_group: defaultdict[str, list[str]] = defaultdict(list)
+    archive_by_id: dict[str, int] = {}
+    delete_error: tuple[str, str] | None = None
 
     try:
         for plan, current in ready:
+            if live_keyword_count - 1 < policy.cleanup_stop:
+                print("[SAFE STOP] Live floor reached during batch. Remaining READY rows were not touched.")
+                break
+
             kid = plan.get("keyword_id", "")
             identity_key = "|".join(
                 (
@@ -383,44 +370,49 @@ def main() -> int:
             payload = {
                 "plan": plan,
                 "keyword_before_delete": current,
-                "inactivity_window": {
-                    "since": inactivity_since,
-                    "until": inactivity_until,
-                },
-                "click_window": {
-                    "since": click_since,
-                    "until": click_until,
-                },
+                "inactivity_window": {"since": inactivity_since, "until": inactivity_until},
+                "click_window": {"since": click_since, "until": click_until},
+                "history_window": {"since": history_since, "until": history_until},
             }
 
-            try:
-                client.delete_keyword(kid)
-            except NaverSearchAdsError as exc:
-                for audit in audit_rows:
-                    if audit.get("keyword_id") == kid:
-                        audit["delete_result"] = f"ERROR:{exc}"
-                write_manifest(manifest_path, audit_rows)
-                print(f"[EMERGENCY STOP] Delete failed for {kid}: {exc}")
-                return 3
-
-            store.archive_deleted_keyword(
+            # Critical ordering: the complete restore payload is committed to
+            # SQLite before any DELETE request is sent.
+            archive_id = store.prepare_keyword_archive(
                 identity_key=identity_key,
                 keyword_id=kid,
                 campaign_id=plan.get("campaign_id", ""),
                 adgroup_id=plan.get("adgroup_id", ""),
                 keyword=plan.get("keyword", ""),
                 tier="GENERAL",
-                delete_reason="V2_DELETE_APPROVED_AND_LIVE_REVALIDATED",
+                delete_reason="V2_FINAL_30D_60D_90D_LIVE_REVALIDATED",
                 payload=payload,
             )
+            archive_by_id[kid] = archive_id
+            for audit in audit_rows:
+                if audit.get("keyword_id") == kid:
+                    audit["archive_id"] = archive_id
+
+            store.mark_archive_delete_requested(archive_id)
+            try:
+                client.delete_keyword(kid)
+            except NaverSearchAdsError as exc:
+                store.mark_archive_delete_failed(archive_id, str(exc))
+                for audit in audit_rows:
+                    if audit.get("keyword_id") == kid:
+                        audit["delete_result"] = f"ERROR:{exc}"
+                delete_error = (kid, str(exc))
+                break
+
+            store.mark_archive_delete_api_ok(archive_id)
             deleted_ids.append(kid)
             deleted_by_group[plan.get("adgroup_id", "")].append(kid)
+            live_keyword_count -= 1
             for audit in audit_rows:
                 if audit.get("keyword_id") == kid:
                     audit["delete_result"] = "DELETED"
 
-        # Verify by re-reading every touched ad group. Any still-present id is a
-        # hard failure that is surfaced immediately.
+        # Verify every keyword for which DELETE returned success, even when a
+        # later keyword caused an emergency stop.
         verification_failed = False
         for adgroup_id, ids in deleted_by_group.items():
             remaining_ids = {
@@ -428,6 +420,13 @@ def main() -> int:
             }
             for kid in ids:
                 gone = kid not in remaining_ids
+                archive_id = archive_by_id.get(kid)
+                if archive_id is not None:
+                    store.mark_archive_verified(
+                        archive_id,
+                        gone=gone,
+                        error=None if gone else "keyword still present after DELETE response",
+                    )
                 for audit in audit_rows:
                     if audit.get("keyword_id") == kid:
                         audit["verify_result"] = "ABSENT_OK" if gone else "STILL_PRESENT"
@@ -437,11 +436,18 @@ def main() -> int:
         write_manifest(manifest_path, audit_rows)
         print("")
         print(f"Deleted                : {len(deleted_ids):,}")
-        print(f"Post-delete verified   : {len(deleted_ids):,}")
+        print(f"Post-delete checked    : {len(deleted_ids):,}")
+        print(f"Estimated live count   : {live_keyword_count:,}")
+
+        if delete_error is not None:
+            kid, error = delete_error
+            print(f"[EMERGENCY STOP] Delete failed for {kid}: {error}")
+            print("Already-deleted rows were still post-verified and their restore archives remain intact.")
+            return 3
         if verification_failed:
             print("[WARNING] At least one deleted ID was still present during verification.")
             return 4
-        print("[OK] Batch deletion and post-verification completed.")
+        print("[OK] Safe subset deletion and post-verification completed.")
         return 0
     finally:
         store.close()
