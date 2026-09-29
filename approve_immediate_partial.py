@@ -55,15 +55,16 @@ def main() -> int:
         for row in audit_rows
         if row.get("gate_result") == "READY" and row.get("keyword_id")
     }
-    blocked_rows = [row for row in audit_rows if row.get("gate_result") != "READY" and row.get("keyword_id")]
+    blocked_rows = [
+        row
+        for row in audit_rows
+        if row.get("gate_result") != "READY" and row.get("keyword_id")
+    ]
     blocked_ids = {row.get("keyword_id", "") for row in blocked_rows}
     blocked_reason_by_id = {
         row.get("keyword_id", ""): (row.get("gate_reason") or "live_gate_failed")
         for row in blocked_rows
     }
-    if not ready_ids:
-        print("[SAFE STOP] No candidate passed every live gate. Nothing was approved.")
-        return 2
 
     scan_path = latest_file(BACKUP_DIR, "v2_scan_*.csv")
     plan_path = latest_file(BACKUP_DIR, "v2_target_delete_plan_*.csv")
@@ -85,7 +86,7 @@ def main() -> int:
         and row.get("plan_action") == "TARGET_DELETE_AFTER_APPROVAL"
     }
     approved_ids = ready_ids & valid_scan_ids & valid_plan_ids
-    if not approved_ids:
+    if ready_ids and not approved_ids:
         print("[SAFE STOP] READY audit rows no longer match the current scan/plan.")
         return 2
 
@@ -97,10 +98,11 @@ def main() -> int:
             out["status"] = "DELETE_APPROVED"
             out["reason"] = "immediate_live_revalidated_partial_approval"
         elif kid in blocked_ids and row.get("status") == "DELETE_PENDING":
-            # Keep failed rows out of the very next 20-candidate batch. A future
-            # full V2 scan may classify them again from fresh stats.
             out["status"] = "WATCH"
-            out["reason"] = "immediate_review_hold:" + blocked_reason_by_id.get(kid, "live_gate_failed")
+            out["reason"] = "immediate_review_hold:" + blocked_reason_by_id.get(
+                kid,
+                "live_gate_failed",
+            )
         new_scan_rows.append(out)
 
     new_plan_rows: list[dict[str, object]] = []
@@ -109,7 +111,10 @@ def main() -> int:
         kid = row.get("keyword_id", "")
         if kid in approved_ids:
             out["status"] = "DELETE_APPROVED"
-            out["plan_reason"] = str(out.get("plan_reason", "")) + "; immediate live-safe partial approval"
+            out["plan_reason"] = (
+                str(out.get("plan_reason", ""))
+                + "; immediate live-safe partial approval"
+            )
         elif kid in blocked_ids:
             out["status"] = "WATCH"
             out["plan_action"] = "LIVE_REVIEW_HOLD"
@@ -131,10 +136,10 @@ def main() -> int:
     print(f"[PARTIAL APPROVAL] Held blocked rows  : {len(blocked_ids):,}")
     print(f"Updated scan                         : {scan_out}")
     print(f"Updated plan                         : {plan_out}")
-    print("[OK] Safe rows were approved; blocked rows were moved to WATCH hold.")
+    print("[OK] Safe rows were approved; every blocked row was moved to WATCH hold.")
     print("Blocked rows will not be selected again in the next immediate batch.")
     print("A future full V2 scan can reconsider them using fresh statistics.")
-    print("Nothing was deleted. The live delete executor will revalidate approved rows again.")
+    print("Nothing was deleted. The live delete executor revalidates approved rows again.")
     return 0
 
 
