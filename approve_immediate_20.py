@@ -4,15 +4,15 @@ import argparse
 import csv
 import math
 from collections import Counter
-from datetime import datetime, timedelta
+from datetime import datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
 from dotenv import load_dotenv
 
-from src.keyword_cleaner.naver_api import NaverConfig, NaverSearchAdsClient, NaverSearchAdsError
-from src.keyword_cleaner.policy_v2 import CleanerPolicy, keyword_tier, normalize
-from src.keyword_cleaner.stats_v2 import get_singular_verified_keyword_stat
+from src.keyword_cleaner.live_safety import evaluate_general_delete_gate
+from src.keyword_cleaner.naver_api import NaverConfig, NaverSearchAdsClient
+from src.keyword_cleaner.policy_v2 import CleanerPolicy
 
 
 KST = ZoneInfo("Asia/Seoul")
@@ -52,28 +52,11 @@ def load_lines(path: Path) -> list[str]:
     ]
 
 
-def stats_range(days: int) -> tuple[str, str]:
-    today = datetime.now(KST).date()
-    until = today - timedelta(days=1)
-    since = until - timedelta(days=days - 1)
-    return since.isoformat(), until.isoformat()
-
-
 def as_int(value: object, default: int = 0) -> int:
     try:
         return int(float(value or default))
     except (TypeError, ValueError):
         return default
-
-
-def exposure_ok(row: dict) -> bool:
-    if row.get("userLock") is True:
-        return False
-    return str(row.get("status", "")).strip().upper() == "ELIGIBLE"
-
-
-def keyword_exposure_ok(row: dict) -> bool:
-    return exposure_ok(row) and str(row.get("inspectStatus", "")).strip().upper() == "APPROVED"
 
 
 def parse_args() -> argparse.Namespace:
@@ -126,7 +109,10 @@ def main() -> int:
             continue
         if latest.get("status") != "DELETE_PENDING":
             continue
-        if as_int(latest.get("age_days"), 0) < max(policy.general_protection_days, policy.general_inactivity_days):
+        if as_int(latest.get("age_days"), 0) < max(
+            policy.general_protection_days,
+            policy.general_inactivity_days,
+        ):
             continue
         candidates.append(row)
 
@@ -165,19 +151,14 @@ def main() -> int:
             adgroups[str(group.get("nccAdgroupId", ""))] = group
 
     selected_by_group: Counter[str] = Counter(row.get("adgroup_id", "") for row in selected)
-    current_group_keywords: dict[str, list[dict]] = {}
     for adgroup_id in selected_by_group:
-        current_group_keywords[adgroup_id] = client.get_keywords(adgroup_id)
-        total = len(current_group_keywords[adgroup_id])
+        current_keywords = client.get_keywords(adgroup_id)
+        total = len(current_keywords)
         planned = selected_by_group[adgroup_id]
         if planned > math.floor(total * PER_GROUP_DELETE_CAP):
             raise SystemExit(f"[SAFE STOP] Group {adgroup_id} would exceed 50% delete cap.")
         if total - planned < MIN_GROUP_SURVIVORS:
             raise SystemExit(f"[SAFE STOP] Group {adgroup_id} would fall below 4 survivors.")
-
-    inactivity_since, inactivity_until = stats_range(policy.general_inactivity_days)
-    click_since, click_until = stats_range(policy.click_protection_days)
-    history_since, history_until = stats_range(policy.reference_history_days)
 
     audit_rows: list[dict[str, object]] = []
     ready_ids: list[str] = []
@@ -185,100 +166,53 @@ def main() -> int:
 
     for index, plan in enumerate(selected, start=1):
         kid = plan.get("keyword_id", "")
-        audit: dict[str, object] = {
-            "checked_at": checked_at,
-            "campaign_name": plan.get("campaign_name", ""),
-            "adgroup_name": plan.get("adgroup_name", ""),
-            "keyword": plan.get("keyword", ""),
-            "keyword_id": kid,
-            "age_days": scan_by_id.get(kid, {}).get("age_days", ""),
-            "gate_result": "BLOCK",
-            "gate_reason": "",
-            "30d_impressions": "",
-            "30d_clicks": "",
-            "60d_clicks": "",
-            "90d_impressions": "",
-            "90d_clicks": "",
-        }
         print(f"@@IMMEDIATE_PROGRESS|{index}|{len(selected)}")
-
-        try:
-            current = client.get_keyword(kid)
-        except NaverSearchAdsError as exc:
-            audit["gate_reason"] = f"keyword_lookup_failed:{exc}"
-            audit_rows.append(audit)
-            continue
-
-        if normalize(str(current.get("keyword", ""))) != normalize(plan.get("keyword", "")):
-            audit["gate_reason"] = "keyword_text_changed"
-            audit_rows.append(audit)
-            continue
-        if str(current.get("nccAdgroupId", "")) != plan.get("adgroup_id", ""):
-            audit["gate_reason"] = "adgroup_changed"
-            audit_rows.append(audit)
-            continue
-
-        campaign = campaigns.get(plan.get("campaign_id", ""))
-        adgroup = adgroups.get(plan.get("adgroup_id", ""))
-        if not campaign or not adgroup:
-            audit["gate_reason"] = "parent_not_found"
-            audit_rows.append(audit)
-            continue
-        if not exposure_ok(campaign) or not exposure_ok(adgroup) or not keyword_exposure_ok(current):
-            audit["gate_reason"] = "current_exposure_not_eligible"
-            audit_rows.append(audit)
-            continue
-
-        current_tier, tier_reason = keyword_tier(
-            adgroup_name=str(adgroup.get("name", "")),
-            keyword=str(current.get("keyword", "")),
+        gate = evaluate_general_delete_gate(
+            client=client,
+            plan=plan,
             policy=policy,
+            campaigns=campaigns,
+            adgroups=adgroups,
             manual_permanent_keywords=manual_permanent_keywords,
             manual_type_core_keywords=manual_type_core_keywords,
         )
-        if current_tier != "GENERAL":
-            audit["gate_reason"] = f"tier_changed:{current_tier}:{tier_reason}"
-            audit_rows.append(audit)
-            continue
-
-        recent = get_singular_verified_keyword_stat(client, kid, since=inactivity_since, until=inactivity_until)
-        clicks = get_singular_verified_keyword_stat(client, kid, since=click_since, until=click_until)
-        history = get_singular_verified_keyword_stat(client, kid, since=history_since, until=history_until)
-        audit["30d_impressions"] = recent.impressions
-        audit["30d_clicks"] = recent.clicks
-        audit["60d_clicks"] = clicks.clicks
-        audit["90d_impressions"] = history.impressions
-        audit["90d_clicks"] = history.clicks
-
-        if not recent.complete or not clicks.complete or not history.complete:
-            audit["gate_reason"] = "stats_revalidation_incomplete"
-            audit_rows.append(audit)
-            continue
-        if (recent.impressions or 0) != 0 or (recent.clicks or 0) != 0:
-            audit["gate_reason"] = "recent_30d_activity_detected"
-            audit_rows.append(audit)
-            continue
-        if (clicks.clicks or 0) != 0:
-            audit["gate_reason"] = "click_within_60d"
-            audit_rows.append(audit)
-            continue
-        if (history.impressions or 0) != 0 or (history.clicks or 0) != 0:
-            audit["gate_reason"] = "history_within_90d"
-            audit_rows.append(audit)
-            continue
-
-        audit["gate_result"] = "READY"
-        audit["gate_reason"] = "30d_zero_60d_click_zero_90d_zero_and_all_live_gates_passed"
-        audit_rows.append(audit)
-        ready_ids.append(kid)
+        audit_rows.append(
+            {
+                "checked_at": checked_at,
+                "campaign_name": plan.get("campaign_name", ""),
+                "adgroup_name": plan.get("adgroup_name", ""),
+                "keyword": plan.get("keyword", ""),
+                "keyword_id": kid,
+                "age_days": scan_by_id.get(kid, {}).get("age_days", ""),
+                "gate_result": "READY" if gate.ready else "BLOCK",
+                "gate_reason": gate.reason,
+                "30d_impressions": gate.inactivity_impressions,
+                "30d_clicks": gate.inactivity_clicks,
+                "60d_clicks": gate.click_window_clicks,
+                "90d_impressions": gate.history_impressions,
+                "90d_clicks": gate.history_clicks,
+            }
+        )
+        if gate.ready:
+            ready_ids.append(kid)
 
     AUDIT_DIR.mkdir(parents=True, exist_ok=True)
     stamp = datetime.now(KST).strftime("%Y%m%d_%H%M%S")
     audit_path = AUDIT_DIR / f"v2_immediate_approval_{stamp}.csv"
     audit_fields = [
-        "checked_at", "campaign_name", "adgroup_name", "keyword", "keyword_id", "age_days",
-        "gate_result", "gate_reason", "30d_impressions", "30d_clicks", "60d_clicks",
-        "90d_impressions", "90d_clicks",
+        "checked_at",
+        "campaign_name",
+        "adgroup_name",
+        "keyword",
+        "keyword_id",
+        "age_days",
+        "gate_result",
+        "gate_reason",
+        "30d_impressions",
+        "30d_clicks",
+        "60d_clicks",
+        "90d_impressions",
+        "90d_clicks",
     ]
     write_csv(audit_path, audit_rows, audit_fields)
 
@@ -287,8 +221,11 @@ def main() -> int:
     print(f"Blocked                 : {len(selected) - len(ready_ids):,}")
     print(f"Audit CSV               : {audit_path}")
 
+    # Preserve the original all-or-none return contract. The packaged partial
+    # wrapper consumes this fresh audit and promotes only independently READY
+    # rows while moving blocked rows to review hold.
     if len(ready_ids) != len(selected):
-        print("[SAFE STOP] At least one of the first-test candidates failed. No keyword was approved.")
+        print("[SAFE STOP] At least one first-test candidate failed the common 30d/60d/90d gate.")
         return 2
 
     ready_set = set(ready_ids)
@@ -317,7 +254,7 @@ def main() -> int:
     print(f"Updated scan            : {scan_out}")
     print(f"Updated plan            : {plan_out}")
     print("[OK] Immediate first-test approval completed. Nothing was deleted yet.")
-    print("Next step: run the existing live delete executor. It will revalidate all 20 again before deletion.")
+    print("Next step: live delete executor reuses the same 30d/60d/90d gate before deletion.")
     return 0
 
 
