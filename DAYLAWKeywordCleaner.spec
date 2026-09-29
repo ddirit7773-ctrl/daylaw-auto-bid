@@ -13,6 +13,7 @@ hiddenimports = [
     "run_v2_scan",
     "build_v2_delete_plan",
     "approve_immediate_20",
+    "approve_immediate_partial",
     "execute_v2_delete",
     "query_account_stats",
     "restore_deleted_keyword",
@@ -28,7 +29,7 @@ hiddenimports = [
 ]
 
 a = Analysis(
-    ["daylaw_app.py"],
+    ["daylaw_app_v12_hotfix.py"],
     pathex=[],
     binaries=[],
     datas=datas,
