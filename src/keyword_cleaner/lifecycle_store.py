@@ -47,6 +47,16 @@ class LifecycleStore:
     def rollback(self) -> None:
         self.conn.rollback()
 
+    def _column_names(self, table: str) -> set[str]:
+        return {
+            str(row["name"])
+            for row in self.conn.execute(f"PRAGMA table_info({table})").fetchall()
+        }
+
+    def _ensure_archive_column(self, name: str, ddl: str) -> None:
+        if name not in self._column_names("keyword_archive"):
+            self.conn.execute(f"ALTER TABLE keyword_archive ADD COLUMN {name} {ddl}")
+
     def _init_schema(self) -> None:
         self.conn.executescript(
             """
@@ -83,6 +93,29 @@ class LifecycleStore:
                 ON keyword_archive(identity_key);
             CREATE INDEX IF NOT EXISTS idx_keyword_archive_deleted_at
                 ON keyword_archive(deleted_at);
+            """
+        )
+
+        # Online migration for installations created before the pre-delete
+        # journal existed. Old archive rows were written only after a successful
+        # DELETE, so the default DELETED_VERIFIED preserves their meaning.
+        self._ensure_archive_column(
+            "delete_status",
+            "TEXT NOT NULL DEFAULT 'DELETED_VERIFIED'",
+        )
+        self._ensure_archive_column("prepared_at", "TEXT")
+        self._ensure_archive_column("delete_requested_at", "TEXT")
+        self._ensure_archive_column("verified_at", "TEXT")
+        self._ensure_archive_column("delete_error", "TEXT")
+        self.conn.execute(
+            """
+            UPDATE keyword_archive
+               SET prepared_at = COALESCE(prepared_at, deleted_at),
+                   verified_at = CASE
+                       WHEN delete_status = 'DELETED_VERIFIED'
+                       THEN COALESCE(verified_at, deleted_at)
+                       ELSE verified_at
+                   END
             """
         )
         self.conn.commit()
@@ -180,6 +213,115 @@ class LifecycleStore:
             last_reason=row["last_reason"],
         )
 
+    def prepare_keyword_archive(
+        self,
+        *,
+        identity_key: str,
+        keyword_id: str,
+        campaign_id: str,
+        adgroup_id: str,
+        keyword: str,
+        tier: str,
+        delete_reason: str,
+        payload: dict[str, Any],
+        prepared_at: str | None = None,
+    ) -> int:
+        """Persist a full restore payload before any DELETE request is sent."""
+        prepared_at = prepared_at or _utc_now_iso()
+        cursor = self.conn.execute(
+            """
+            INSERT INTO keyword_archive (
+                identity_key, keyword_id, campaign_id, adgroup_id, keyword, tier,
+                deleted_at, delete_reason, payload_json, delete_status, prepared_at,
+                delete_requested_at, verified_at, delete_error
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'PREPARED', ?, NULL, NULL, NULL)
+            """,
+            (
+                identity_key,
+                keyword_id,
+                campaign_id,
+                adgroup_id,
+                keyword,
+                tier,
+                prepared_at,
+                delete_reason,
+                json.dumps(payload, ensure_ascii=False, sort_keys=True),
+                prepared_at,
+            ),
+        )
+        self.conn.commit()
+        return int(cursor.lastrowid)
+
+    def mark_archive_delete_requested(
+        self,
+        archive_id: int,
+        requested_at: str | None = None,
+    ) -> None:
+        requested_at = requested_at or _utc_now_iso()
+        self.conn.execute(
+            """
+            UPDATE keyword_archive
+               SET delete_status = 'DELETE_REQUESTED',
+                   delete_requested_at = ?,
+                   delete_error = NULL
+             WHERE archive_id = ?
+            """,
+            (requested_at, archive_id),
+        )
+        self.conn.commit()
+
+    def mark_archive_delete_api_ok(
+        self,
+        archive_id: int,
+        deleted_at: str | None = None,
+    ) -> None:
+        deleted_at = deleted_at or _utc_now_iso()
+        self.conn.execute(
+            """
+            UPDATE keyword_archive
+               SET delete_status = 'DELETE_API_OK',
+                   deleted_at = ?,
+                   delete_error = NULL
+             WHERE archive_id = ?
+            """,
+            (deleted_at, archive_id),
+        )
+        self.conn.commit()
+
+    def mark_archive_delete_failed(self, archive_id: int, error: str) -> None:
+        self.conn.execute(
+            """
+            UPDATE keyword_archive
+               SET delete_status = 'DELETE_FAILED',
+                   delete_error = ?
+             WHERE archive_id = ?
+            """,
+            (str(error), archive_id),
+        )
+        self.conn.commit()
+
+    def mark_archive_verified(
+        self,
+        archive_id: int,
+        *,
+        gone: bool,
+        error: str | None = None,
+        verified_at: str | None = None,
+    ) -> None:
+        verified_at = verified_at or _utc_now_iso()
+        status = "DELETED_VERIFIED" if gone else "VERIFY_FAILED"
+        self.conn.execute(
+            """
+            UPDATE keyword_archive
+               SET delete_status = ?,
+                   verified_at = ?,
+                   delete_error = ?
+             WHERE archive_id = ?
+            """,
+            (status, verified_at, error, archive_id),
+        )
+        self.conn.commit()
+
     def archive_deleted_keyword(
         self,
         *,
@@ -193,28 +335,22 @@ class LifecycleStore:
         payload: dict[str, Any],
         deleted_at: str | None = None,
     ) -> int:
-        deleted_at = deleted_at or _utc_now_iso()
-        cursor = self.conn.execute(
-            """
-            INSERT INTO keyword_archive (
-                identity_key, keyword_id, campaign_id, adgroup_id, keyword, tier,
-                deleted_at, delete_reason, payload_json
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                identity_key,
-                keyword_id,
-                campaign_id,
-                adgroup_id,
-                keyword,
-                tier,
-                deleted_at,
-                delete_reason,
-                json.dumps(payload, ensure_ascii=False, sort_keys=True),
-            ),
+        """Backward-compatible helper for already-verified deleted keywords."""
+        archive_id = self.prepare_keyword_archive(
+            identity_key=identity_key,
+            keyword_id=keyword_id,
+            campaign_id=campaign_id,
+            adgroup_id=adgroup_id,
+            keyword=keyword,
+            tier=tier,
+            delete_reason=delete_reason,
+            payload=payload,
+            prepared_at=deleted_at,
         )
-        self.conn.commit()
-        return int(cursor.lastrowid)
+        self.mark_archive_delete_requested(archive_id, requested_at=deleted_at)
+        self.mark_archive_delete_api_ok(archive_id, deleted_at=deleted_at)
+        self.mark_archive_verified(archive_id, gone=True, verified_at=deleted_at)
+        return archive_id
 
     def mark_restored(self, archive_id: int, restored_at: str | None = None) -> None:
         restored_at = restored_at or _utc_now_iso()
