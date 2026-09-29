@@ -50,7 +50,7 @@ BACKENDS = {
     "build_v2_delete_plan": "build_v2_delete_plan",
     "approve_immediate_20": "approve_immediate_20",
     "execute_v2_delete": "execute_v2_delete",
-    "restricted_cleanup": "restricted_cleanup",
+    "restricted_cleanup": "restricted_cleanup_v2",
     "query_account_stats": "query_account_stats",
     "restore_deleted_keyword": "restore_deleted_keyword",
 }
@@ -98,7 +98,7 @@ def main() -> int:
     if len(sys.argv) >= 2 and sys.argv[1] == "--self-test":
         import desktop_app_v8  # noqa: F401
         import approve_immediate_20  # noqa: F401
-        import restricted_cleanup  # noqa: F401
+        import restricted_cleanup_v2  # noqa: F401
         print("DAYLAW PACKAGED SELF TEST OK")
         return 0
 
