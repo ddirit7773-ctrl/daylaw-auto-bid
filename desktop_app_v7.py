@@ -14,24 +14,25 @@ from src.keyword_cleaner.policy_v2 import CleanerPolicy
 
 
 class DesktopAppV7(DesktopAppV6):
-    """v12 shell: safe immediate first-test approval for up to 20 GENERAL keywords."""
+    """v13 shell: hardened first-test approval and live-delete safety UI."""
 
     def __init__(self) -> None:
         super().__init__()
-        self._retag_v12(self.sidebar)
+        self._retag_v13(self.sidebar)
         self._add_immediate_first_test_button()
         if hasattr(self, "refresh_delete_queue"):
             self.refresh_delete_queue()
 
-    def _retag_v12(self, widget) -> None:
+    def _retag_v13(self, widget) -> None:
         for child in widget.winfo_children():
             try:
                 text = child.cget("text")
-                if isinstance(text, str) and "v11" in text:
-                    child.configure(text=text.replace("v11", "v12"))
+                if isinstance(text, str):
+                    text = text.replace("v11", "v13").replace("v12", "v13")
+                    child.configure(text=text)
             except Exception:
                 pass
-            self._retag_v12(child)
+            self._retag_v13(child)
 
     def _add_immediate_first_test_button(self) -> None:
         if not hasattr(self, "live_delete_button"):
@@ -67,6 +68,20 @@ class DesktopAppV7(DesktopAppV6):
 
     def _consume_progress_line(self, line: str, label: str, job_kind: str) -> None:
         text = line.strip()
+
+        account_match = re.match(r"@@ACCOUNT_COUNT_PROGRESS\|(\d+)\|(\d+)\|(\d+)", text)
+        if account_match:
+            done = int(account_match.group(1))
+            total = max(int(account_match.group(2)), 1)
+            keywords = int(account_match.group(3))
+            pct = 95 + (done / total) * 3
+            self._set_progress(
+                pct,
+                f"{label} · 실시간 계정 하한선 확인",
+                f"광고그룹 {done:,} / {total:,}개 확인 · 현재까지 키워드 {keywords:,}개",
+            )
+            return
+
         match = re.match(r"@@IMMEDIATE_PROGRESS\|(\d+)\|(\d+)", text)
         if match:
             done = int(match.group(1))
@@ -87,14 +102,13 @@ class DesktopAppV7(DesktopAppV6):
         except (TypeError, ValueError):
             return 0
 
-    def _latest_immediate_audit(self) -> list[dict[str, str]]:
-        folder = APP_ROOT / "data" / "delete_audit"
-        files = sorted(folder.glob("v2_immediate_approval_*.csv"), key=lambda p: p.stat().st_mtime)
+    @staticmethod
+    def _latest_csv(folder: Path, pattern: str, max_age_seconds: int = 600) -> list[dict[str, str]]:
+        files = sorted(folder.glob(pattern), key=lambda p: p.stat().st_mtime)
         if not files:
             return []
         latest = files[-1]
-        # Do not show a stale audit from an older run as if it belonged to this run.
-        if time.time() - latest.stat().st_mtime > 10 * 60:
+        if time.time() - latest.stat().st_mtime > max_age_seconds:
             return []
         try:
             with latest.open("r", encoding="utf-8-sig", newline="") as fp:
@@ -102,13 +116,19 @@ class DesktopAppV7(DesktopAppV6):
         except (OSError, csv.Error):
             return []
 
+    def _latest_immediate_audit(self) -> list[dict[str, str]]:
+        return self._latest_csv(APP_ROOT / "data" / "delete_audit", "v2_immediate_approval_*.csv")
+
+    def _latest_delete_manifest(self) -> list[dict[str, str]]:
+        return self._latest_csv(APP_ROOT / "data" / "delete_audit", "v2_delete_manifest_*.csv")
+
     def _gate_reason_ko(self, row: dict[str, str]) -> str:
         reason = (row.get("gate_reason") or "").strip()
-        imp30 = self._audit_int(row.get("30d_impressions"))
-        clk30 = self._audit_int(row.get("30d_clicks"))
-        clk60 = self._audit_int(row.get("60d_clicks"))
-        imp90 = self._audit_int(row.get("90d_impressions"))
-        clk90 = self._audit_int(row.get("90d_clicks"))
+        imp30 = self._audit_int(row.get("30d_impressions", row.get("inactivity_impressions")))
+        clk30 = self._audit_int(row.get("30d_clicks", row.get("inactivity_clicks")))
+        clk60 = self._audit_int(row.get("60d_clicks", row.get("click_window_clicks")))
+        imp90 = self._audit_int(row.get("90d_impressions", row.get("history_impressions")))
+        clk90 = self._audit_int(row.get("90d_clicks", row.get("history_clicks")))
 
         if row.get("gate_result") == "READY":
             return "모든 안전조건 통과"
@@ -126,9 +146,9 @@ class DesktopAppV7(DesktopAppV6):
             return "보호 규칙 재확인 결과 일반 삭제 대상이 아니어서 제외"
         if reason == "stats_revalidation_incomplete":
             return "30일/60일/90일 통계를 완전하게 재검증하지 못함"
-        if reason == "recent_30d_activity_detected":
+        if reason in {"recent_30d_activity_detected", "recent_activity_detected"}:
             return f"최근 30일 활동 발견: 노출 {imp30:,}회, 클릭 {clk30:,}회"
-        if reason == "click_within_60d":
+        if reason in {"click_within_60d", "click_protection_activity_detected"}:
             return f"최근 60일 안에 클릭 {clk60:,}회가 있어 제외"
         if reason == "history_within_90d":
             return f"최근 90일 활동 발견: 노출 {imp90:,}회, 클릭 {clk90:,}회"
@@ -149,6 +169,31 @@ class DesktopAppV7(DesktopAppV6):
                 lines.append(f"• {group} / {keyword}: {self._gate_reason_ko(row)}")
             if len(blocked) > 10:
                 lines.append(f"• 외 {len(blocked) - 10}개는 감사 로그에 기록되어 있습니다.")
+        return "\n".join(lines)
+
+    def _delete_result_text(self, rows: list[dict[str, str]]) -> str:
+        if not rows:
+            return "삭제 결과 로그를 읽지 못했습니다."
+        deleted = [row for row in rows if row.get("delete_result") == "DELETED"]
+        blocked = [row for row in rows if row.get("gate_result") != "READY"]
+        failed = [
+            row for row in rows
+            if (row.get("delete_result") or "").startswith("ERROR:")
+            or row.get("verify_result") == "STILL_PRESENT"
+        ]
+        lines = [
+            f"최종검토 {len(rows)}개 · 실제 삭제 {len(deleted)}개 · 보류 {len(blocked)}개 · 오류 {len(failed)}개"
+        ]
+        if blocked:
+            lines.append("")
+            lines.append("최종 삭제에서 보류된 키워드:")
+            for row in blocked[:8]:
+                group = (row.get("adgroup_name") or "광고그룹 미확인").strip()
+                keyword = (row.get("keyword") or "키워드 미확인").strip()
+                lines.append(f"• {group} / {keyword}: {self._gate_reason_ko(row)}")
+        if failed:
+            lines.append("")
+            lines.append("확인이 필요한 오류 항목이 있습니다. 삭제 기록/복원 화면을 확인해주세요.")
         return "\n".join(lines)
 
     def _translate_immediate_failure(self, detail: str) -> str:
@@ -203,14 +248,11 @@ class DesktopAppV7(DesktopAppV6):
                     "안전검토 완료",
                     detail
                     + "\n\n승인된 키워드만 '실제 삭제 · 최대 20개' 버튼으로 진행할 수 있습니다."
-                    + "\n실제 삭제 직전에 동일 조건을 다시 한 번 확인합니다.",
+                    + "\n실제 삭제 직전에 동일한 30일/60일/90일 조건을 다시 확인합니다.",
                 )
             else:
                 detail = self._immediate_result_text(rows) if rows else "승인된 키워드가 없습니다."
-                messagebox.showwarning(
-                    "승인 없음",
-                    detail + "\n\n실제 삭제는 실행되지 않았습니다.",
-                )
+                messagebox.showwarning("승인 없음", detail + "\n\n실제 삭제는 실행되지 않았습니다.")
 
         def failure(detail: str) -> None:
             messagebox.showwarning("즉시 안전검토 결과", self._translate_immediate_failure(detail))
@@ -235,16 +277,19 @@ class DesktopAppV7(DesktopAppV6):
             return
         if not messagebox.askyesno(
             "실제 삭제 확인",
-            f"삭제 승인된 키워드 중 최대 {min(batch, approved)}개를 실제 삭제합니다.\n\n"
-            "삭제 직전 상태, 보호등급, 30일 통계, 60일 클릭을 다시 확인하며\n"
-            "하나라도 안전조건을 통과하지 못하면 전체 배치를 중단합니다.\n\n"
+            f"삭제 승인된 키워드 중 최대 {min(batch, approved)}개를 실제 삭제 대상으로 다시 검증합니다.\n\n"
+            "삭제 직전 30일 0활동 / 60일 클릭 0 / 90일 0활동 / 보호등급을 동일하게 다시 확인합니다.\n"
+            "실패한 키워드는 보류하고, 독립적으로 모든 조건을 통과한 키워드만 진행합니다.\n\n"
             "계속하시겠습니까?",
         ):
             return
         if not messagebox.askyesno(
             "최종 확인",
-            "이 작업은 네이버 광고계정의 키워드를 실제로 삭제합니다.\n"
-            "삭제 원본은 복원용 archive에 저장되고 삭제 후 존재 여부도 재검증합니다.\n\n"
+            f"네이버 광고계정의 키워드를 실제로 삭제합니다.\n\n"
+            f"• 삭제 전 복원 원본을 먼저 저장\n"
+            f"• 실시간 계정 키워드 수 재조회\n"
+            f"• {policy.cleanup_stop:,}개 아래로 내려가지 않도록 자동 중단\n"
+            f"• 삭제 후 실제 제거 여부 재검증\n\n"
             "최대 20개 테스트 삭제를 실행할까요?",
         ):
             return
@@ -254,10 +299,23 @@ class DesktopAppV7(DesktopAppV6):
             self.refresh_delete_queue()
             if hasattr(self, "refresh_history"):
                 self.refresh_history()
+            rows = self._latest_delete_manifest()
             messagebox.showinfo(
                 "삭제 테스트 완료",
-                "최대 20개 테스트 배치의 삭제 및 사후검증이 완료되었습니다.\n"
-                "삭제 기록 / 복원 화면에서 archive를 확인할 수 있습니다.",
+                self._delete_result_text(rows)
+                + "\n\n삭제 전에 저장한 복원 자료는 '삭제 기록 / 복원'에서 확인할 수 있습니다.",
+            )
+
+        def failure(detail: str) -> None:
+            self.refresh_dashboard()
+            self.refresh_delete_queue()
+            if hasattr(self, "refresh_history"):
+                self.refresh_history()
+            rows = self._latest_delete_manifest()
+            summary = self._delete_result_text(rows) if rows else "삭제 작업이 안전장치에 의해 중단되었습니다."
+            messagebox.showwarning(
+                "삭제 작업 결과",
+                summary + "\n\n" + (detail[-900:] if detail else "자세한 내용은 감사 로그를 확인해주세요."),
             )
 
         self._start_stream_job(
@@ -272,6 +330,7 @@ class DesktopAppV7(DesktopAppV6):
             label="실제 삭제 · 최대 20개",
             job_kind="delete",
             on_success=success,
+            on_failure=failure,
         )
 
 
