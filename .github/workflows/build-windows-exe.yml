@@ -24,7 +24,7 @@ jobs:
       - name: Compile check
         shell: pwsh
         run: |
-          python -m py_compile daylaw_app.py daylaw_app_v12_hotfix.py desktop_app.py desktop_app_v2.py desktop_app_v3.py desktop_app_v4.py desktop_app_v5.py desktop_app_v6.py desktop_app_v7.py approve_immediate_20.py approve_immediate_partial.py restore_deleted_keyword.py query_account_stats.py execute_v2_delete.py run_v2_scan.py src/keyword_cleaner/naver_api.py src/keyword_cleaner/stats_v2.py src/keyword_cleaner/policy_v2.py src/keyword_cleaner/live_safety.py src/keyword_cleaner/lifecycle_store.py
+          python -m py_compile daylaw_app.py daylaw_app_v12_hotfix.py desktop_app.py desktop_app_v2.py desktop_app_v3.py desktop_app_v4.py desktop_app_v5.py desktop_app_v6.py desktop_app_v7.py desktop_app_v8.py approve_immediate_20.py approve_immediate_partial.py restricted_cleanup.py restore_deleted_keyword.py query_account_stats.py execute_v2_delete.py run_v2_scan.py src/keyword_cleaner/naver_api.py src/keyword_cleaner/stats_v2.py src/keyword_cleaner/policy_v2.py src/keyword_cleaner/live_safety.py src/keyword_cleaner/lifecycle_store.py
 
       - name: Safe-fast policy self test
         shell: pwsh
@@ -69,6 +69,28 @@ jobs:
           )
           assert classify_snapshot(snapshot=fully_silent, **common).status == "DELETE_PENDING"
           print("SAFE FAST POLICY TEST OK")
+          '@ | python -
+
+      - name: Restricted-lane discovery self test
+        shell: pwsh
+        run: |
+          @'
+          from restricted_cleanup import scan_restricted_candidate
+
+          base = {
+              "tier": "GENERAL",
+              "age_days": "120",
+              "campaign_status": "ELIGIBLE",
+              "adgroup_status": "ELIGIBLE",
+              "keyword_status": "PAUSED",
+              "inspect_status": "APPROVED",
+          }
+          assert scan_restricted_candidate(base) is True
+          assert scan_restricted_candidate({**base, "tier": "TYPE_CORE"}) is False
+          assert scan_restricted_candidate({**base, "keyword_status": "ELIGIBLE"}) is False
+          assert scan_restricted_candidate({**base, "inspect_status": "UNDER_REVIEW"}) is False
+          assert scan_restricted_candidate({**base, "age_days": "89"}) is False
+          print("RESTRICTED LANE DISCOVERY TEST OK")
           '@ | python -
 
       - name: Pre-delete archive journal self test
