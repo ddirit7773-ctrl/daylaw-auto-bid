@@ -1,10 +1,14 @@
 from __future__ import annotations
 
+import csv
 import re
+import time
+from pathlib import Path
 from tkinter import messagebox
 
 import customtkinter as ctk
 
+from desktop_app_v4 import APP_ROOT
 from desktop_app_v6 import DesktopAppV6
 from src.keyword_cleaner.policy_v2 import CleanerPolicy
 
@@ -76,6 +80,102 @@ class DesktopAppV7(DesktopAppV6):
             return
         super()._consume_progress_line(line, label, job_kind)
 
+    @staticmethod
+    def _audit_int(value: object) -> int:
+        try:
+            return int(float(value or 0))
+        except (TypeError, ValueError):
+            return 0
+
+    def _latest_immediate_audit(self) -> list[dict[str, str]]:
+        folder = APP_ROOT / "data" / "delete_audit"
+        files = sorted(folder.glob("v2_immediate_approval_*.csv"), key=lambda p: p.stat().st_mtime)
+        if not files:
+            return []
+        latest = files[-1]
+        # Do not show a stale audit from an older run as if it belonged to this run.
+        if time.time() - latest.stat().st_mtime > 10 * 60:
+            return []
+        try:
+            with latest.open("r", encoding="utf-8-sig", newline="") as fp:
+                return list(csv.DictReader(fp))
+        except (OSError, csv.Error):
+            return []
+
+    def _gate_reason_ko(self, row: dict[str, str]) -> str:
+        reason = (row.get("gate_reason") or "").strip()
+        imp30 = self._audit_int(row.get("30d_impressions"))
+        clk30 = self._audit_int(row.get("30d_clicks"))
+        clk60 = self._audit_int(row.get("60d_clicks"))
+        imp90 = self._audit_int(row.get("90d_impressions"))
+        clk90 = self._audit_int(row.get("90d_clicks"))
+
+        if row.get("gate_result") == "READY":
+            return "모든 안전조건 통과"
+        if reason.startswith("keyword_lookup_failed"):
+            return "네이버에서 현재 키워드 상태를 다시 조회하지 못함"
+        if reason == "keyword_text_changed":
+            return "스캔 이후 키워드 문구가 변경되어 안전하게 제외"
+        if reason == "adgroup_changed":
+            return "스캔 이후 광고그룹이 변경되어 안전하게 제외"
+        if reason == "parent_not_found":
+            return "현재 캠페인 또는 광고그룹 상태를 확인하지 못함"
+        if reason == "current_exposure_not_eligible":
+            return "현재 캠페인/광고그룹/키워드가 정상 노출 가능 상태가 아님"
+        if reason.startswith("tier_changed"):
+            return "보호 규칙 재확인 결과 일반 삭제 대상이 아니어서 제외"
+        if reason == "stats_revalidation_incomplete":
+            return "30일/60일/90일 통계를 완전하게 재검증하지 못함"
+        if reason == "recent_30d_activity_detected":
+            return f"최근 30일 활동 발견: 노출 {imp30:,}회, 클릭 {clk30:,}회"
+        if reason == "click_within_60d":
+            return f"최근 60일 안에 클릭 {clk60:,}회가 있어 제외"
+        if reason == "history_within_90d":
+            return f"최근 90일 활동 발견: 노출 {imp90:,}회, 클릭 {clk90:,}회"
+        if reason:
+            return f"안전조건 미통과 ({reason})"
+        return "안전조건 미통과"
+
+    def _immediate_result_text(self, rows: list[dict[str, str]]) -> str:
+        ready = [row for row in rows if row.get("gate_result") == "READY"]
+        blocked = [row for row in rows if row.get("gate_result") != "READY"]
+        lines = [f"검토 {len(rows)}개 · 승인 {len(ready)}개 · 보류 {len(blocked)}개"]
+        if blocked:
+            lines.append("")
+            lines.append("보류된 키워드와 이유:")
+            for row in blocked[:10]:
+                group = (row.get("adgroup_name") or "광고그룹 미확인").strip()
+                keyword = (row.get("keyword") or "키워드 미확인").strip()
+                lines.append(f"• {group} / {keyword}: {self._gate_reason_ko(row)}")
+            if len(blocked) > 10:
+                lines.append(f"• 외 {len(blocked) - 10}개는 감사 로그에 기록되어 있습니다.")
+        return "\n".join(lines)
+
+    def _translate_immediate_failure(self, detail: str) -> str:
+        rows = self._latest_immediate_audit()
+        if rows:
+            return (
+                "즉시 안전검토가 완료되었지만 삭제 승인 조건을 충족하지 못한 항목이 있습니다.\n\n"
+                + self._immediate_result_text(rows)
+                + "\n\n실제 삭제는 실행되지 않았습니다."
+            )
+
+        text = detail or ""
+        mappings = [
+            ("No file found for v2_target_delete_plan_", "안전 삭제 계획 파일이 없습니다. 대시보드에서 '안전 삭제 계획 생성'을 먼저 실행해주세요."),
+            ("No file found for v2_scan_", "V2 스캔 결과가 없습니다. 먼저 'V2 전체 스캔'을 실행해주세요."),
+            ("Latest V2 scan is", "최신 V2 스캔이 30분을 초과했습니다. V2 전체 스캔 후 안전 삭제 계획을 다시 생성해주세요."),
+            ("Delete plan is older than the latest scan", "삭제 계획이 최신 스캔보다 오래되었습니다. 안전 삭제 계획을 다시 생성해주세요."),
+            ("would exceed 50% delete cap", "해당 광고그룹에서 삭제 비율이 50%를 넘게 되어 안전장치가 중단했습니다."),
+            ("would fall below 4 survivors", "해당 광고그룹에 최소 4개 키워드를 남길 수 없어 안전장치가 중단했습니다."),
+            ("No candidate passed every live gate", "이번 후보 중 모든 실시간 안전검증을 통과한 키워드가 없습니다."),
+            ("READY audit rows no longer match", "검증 직후 스캔/삭제계획 상태가 달라져 승인하지 않았습니다. 새로 스캔 후 다시 시도해주세요."),
+        ]
+        for needle, korean in mappings:
+            if needle in text:
+                return korean + "\n\n실제 삭제는 실행되지 않았습니다."
+        return "즉시 안전검토 중 오류가 발생했습니다. 실제 삭제는 실행되지 않았습니다.\n\n" + text[-1200:]
+
     def run_immediate_first_test(self) -> None:
         if self.backend_running:
             messagebox.showinfo("작업 진행 중", "현재 작업이 끝난 뒤 다시 실행해주세요.")
@@ -95,26 +195,32 @@ class DesktopAppV7(DesktopAppV6):
         def success() -> None:
             self.refresh_dashboard()
             self.refresh_delete_queue()
+            rows = self._latest_immediate_audit()
             approved = sum(1 for row in self.queue_rows if row.get("status") == "DELETE_APPROVED")
             if approved > 0:
+                detail = self._immediate_result_text(rows) if rows else f"삭제 승인 {approved}개"
                 messagebox.showinfo(
                     "안전검토 완료",
-                    f"실시간 재검증을 통과한 {approved}개가 삭제 승인 상태가 되었습니다.\n\n"
-                    "삭제 대기 화면에서 목록을 확인한 뒤 '실제 삭제 · 최대 20개'를 누르세요.\n"
-                    "실제 삭제 직전 동일 조건을 한 번 더 재검증합니다.",
+                    detail
+                    + "\n\n승인된 키워드만 '실제 삭제 · 최대 20개' 버튼으로 진행할 수 있습니다."
+                    + "\n실제 삭제 직전에 동일 조건을 다시 한 번 확인합니다.",
                 )
             else:
+                detail = self._immediate_result_text(rows) if rows else "승인된 키워드가 없습니다."
                 messagebox.showwarning(
                     "승인 없음",
-                    "20개 중 하나라도 안전조건을 통과하지 못하면 이번 즉시 승인 배치는 전부 중단됩니다.\n"
-                    "감사 로그를 확인하거나 새 스캔 후 다시 시도해주세요.",
+                    detail + "\n\n실제 삭제는 실행되지 않았습니다.",
                 )
+
+        def failure(detail: str) -> None:
+            messagebox.showwarning("즉시 안전검토 결과", self._translate_immediate_failure(detail))
 
         self._start_stream_job(
             command=self.backend_command("approve_immediate_20.py", "--max-approve", str(batch)),
             label="즉시 20개 안전검토",
             job_kind="immediate",
             on_success=success,
+            on_failure=failure,
         )
 
     def run_live_delete(self) -> None:
