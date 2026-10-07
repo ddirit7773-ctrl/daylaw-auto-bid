@@ -324,18 +324,59 @@ class NaverSearchAdsClient:
         keyword: str,
         bid_amt: int | None = None,
         user_lock: bool | None = None,
+        use_group_bid_amt: bool | None = None,
+        links: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
-        body: dict[str, Any] = {
-            "nccAdgroupId": adgroup_id,
-            "keyword": keyword,
-        }
+        body: dict[str, Any] = {"keyword": keyword}
         if bid_amt is not None:
             body["bidAmt"] = int(bid_amt)
         if user_lock is not None:
             body["userLock"] = bool(user_lock)
-        result = self._request("POST", "/ncc/keywords", json_body=[body])
+        if use_group_bid_amt is not None:
+            body["useGroupBidAmt"] = bool(use_group_bid_amt)
+        if links:
+            body["links"] = dict(links)
+
+        result = self._request(
+            "POST",
+            "/ncc/keywords",
+            params={"nccAdgroupId": adgroup_id},
+            json_body=[body],
+        )
         if isinstance(result, list) and result:
             return dict(result[0])
         if isinstance(result, dict):
             return dict(result)
         return {}
+
+    def create_keyword_from_backup(
+        self,
+        adgroup_id: str,
+        backup: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        keyword = str(backup.get("keyword", "")).strip()
+        if not keyword:
+            raise NaverSearchAdsError("Backup keyword text is empty.")
+        bid_amt_raw = backup.get("bidAmt")
+        bid_amt = None
+        try:
+            if bid_amt_raw is not None:
+                bid_amt = int(bid_amt_raw)
+        except (TypeError, ValueError):
+            bid_amt = None
+        return self.create_keyword(
+            adgroup_id=adgroup_id,
+            keyword=keyword,
+            bid_amt=bid_amt,
+            user_lock=(
+                bool(backup.get("userLock"))
+                if backup.get("userLock") is not None
+                else None
+            ),
+            use_group_bid_amt=(
+                bool(backup.get("useGroupBidAmt"))
+                if backup.get("useGroupBidAmt") is not None
+                else None
+            ),
+            links=backup.get("links") if isinstance(backup.get("links"), Mapping) else None,
+        )
