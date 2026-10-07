@@ -22,6 +22,7 @@ from src.keyword_cleaner.stats_v2 import get_verified_keyword_stats
 KST = ZoneInfo("Asia/Seoul")
 BACKUP_DIR = Path("data/backups")
 AUDIT_DIR = Path("data/delete_audit")
+STOP_FILE = Path("data/state/auto_cleanup.stop")
 
 DELETE_CHUNK_SIZE = 50
 PREVALIDATION_RESERVE = 25000
@@ -468,6 +469,11 @@ def run_cleanup(*, live: bool) -> int:
     load_dotenv()
     policy, permanent_keywords, type_keywords = load_policy_and_manual()
     AUDIT_DIR.mkdir(parents=True, exist_ok=True)
+    STOP_FILE.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        STOP_FILE.unlink()
+    except FileNotFoundError:
+        pass
 
     print("=" * 84)
     print("DAYLAW PRODUCTION SAFE CLEANUP")
@@ -666,6 +672,9 @@ def run_cleanup(*, live: bool) -> int:
 
     try:
         for offset in range(0, len(final_ready), DELETE_CHUNK_SIZE):
+            if STOP_FILE.exists():
+                stop_reason = "user_stop_requested"
+                break
             if final_live_count <= policy.cleanup_stop:
                 stop_reason = "cleanup_stop_reached"
                 break
@@ -747,6 +756,9 @@ def run_cleanup(*, live: bool) -> int:
 
             deleted_by_group: defaultdict[str, list[str]] = defaultdict(list)
             for row in checkpoint_ready:
+                if STOP_FILE.exists():
+                    stop_reason = "user_stop_requested"
+                    break
                 if final_live_count <= policy.cleanup_stop:
                     stop_reason = "cleanup_stop_reached"
                     break
