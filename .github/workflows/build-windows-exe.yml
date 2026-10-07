@@ -80,27 +80,50 @@ jobs:
           print("SAFE FAST POLICY TEST OK")
           '@ | python -
 
-      - name: Restricted-lane discovery self test
+      - name: Restricted master-report self test
         shell: pwsh
         run: |
           @'
-          from restricted_cleanup import scan_restricted_candidate
+          from restricted_cleanup import parse_keyword_master_limited_ids, scan_restricted_candidate
 
           base = {
               "tier": "GENERAL",
               "age_days": "120",
               "campaign_status": "ELIGIBLE",
               "adgroup_status": "ELIGIBLE",
-              "keyword_status": "ELIGIBLE",
-              "inspect_status": "LIMITED_APPROVED",
+              "keyword_id": "nkw-one",
           }
-          assert scan_restricted_candidate(base) is True
-          assert scan_restricted_candidate({**base, "inspect_status": "30"}) is True
-          assert scan_restricted_candidate({**base, "tier": "TYPE_CORE"}) is False
-          assert scan_restricted_candidate({**base, "inspect_status": "APPROVED"}) is False
-          assert scan_restricted_candidate({**base, "inspect_status": "UNDER_REVIEW"}) is False
-          assert scan_restricted_candidate({**base, "age_days": "89"}) is False
-          print("RESTRICTED LANE LIMITED_APPROVED TEST OK")
+          report = (
+              "1\tgrp\tnkw-one\tkw1\t70\t\t\t0\t30\t1\t2026-01-01T00:00:00Z\t\t0\n"
+              "1\tgrp\tnkw-two\tkw2\t70\t\t\t0\t20\t1\t2026-01-01T00:00:00Z\t\t0\n"
+          )
+          limited = parse_keyword_master_limited_ids(report)
+          assert limited == {"nkw-one"}
+          assert scan_restricted_candidate(base, limited) is True
+          assert scan_restricted_candidate({**base, "keyword_id": "nkw-two"}, limited) is False
+          assert scan_restricted_candidate({**base, "tier": "TYPE_CORE"}, limited) is False
+          assert scan_restricted_candidate({**base, "age_days": "89"}, limited) is False
+          print("RESTRICTED MASTER REPORT TEST OK")
+          '@ | python -
+
+      - name: Production cleanup group safety self test
+        shell: pwsh
+        run: |
+          @'
+          from auto_cleanup import group_allowances
+
+          snapshot = {
+              "group_keyword_ids": {
+                  "g1": [str(i) for i in range(10)],
+                  "g2": [str(i) for i in range(5)],
+                  "g3": [str(i) for i in range(4)],
+              }
+          }
+          allowance = group_allowances(snapshot)
+          assert allowance["g1"] == 5
+          assert allowance["g2"] == 1
+          assert allowance["g3"] == 0
+          print("PRODUCTION GROUP SAFETY TEST OK")
           '@ | python -
 
       - name: Pre-delete archive journal self test
