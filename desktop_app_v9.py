@@ -207,12 +207,22 @@ class DesktopAppV9(DesktopAppV8):
             "user_stop_requested": "사용자 안전 중지 요청으로 종료",
         }
         reason = row.get("stop_reason", "")
+        initial_master = row.get("master_initial_status", "")
+        final_master = row.get("master_final_status", "")
+        if initial_master == "SKIPPED":
+            master_text = "노출제한 목록: 네이버 서버 오류로 이번 실행에서는 전용 후보 보류"
+        elif final_master == "SKIPPED":
+            master_text = "노출제한 목록: 1차 확인 성공 · 최종 확인 실패로 전용 후보 보류"
+        else:
+            master_text = "노출제한 목록: 정상 확인"
+
         return (
             f"실제 삭제 {self._num(row.get('deleted')):,}개\n"
             f"삭제 후 사라짐 확인 {self._num(row.get('verified')):,}개\n"
             f"삭제 오류 {self._num(row.get('delete_errors')):,}개 · "
             f"사후검증 오류 {self._num(row.get('verify_failures')):,}개\n"
             f"정리 후 예상 키워드 {self._num(row.get('estimated_keywords_after')):,}개\n"
+            f"{master_text}\n"
             f"종료 사유: {stop_map.get(reason, reason or '완료')}"
         )
 
