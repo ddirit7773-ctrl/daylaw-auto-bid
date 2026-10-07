@@ -11,6 +11,7 @@ from dataclasses import dataclass
 from email.utils import parsedate_to_datetime
 from pathlib import Path
 from typing import Any, Iterable, Mapping, Sequence
+from urllib.parse import parse_qsl, urlparse
 
 import requests
 from dotenv import load_dotenv
@@ -234,6 +235,58 @@ class NaverSearchAdsClient:
     def get_keyword(self, keyword_id: str) -> dict[str, Any]:
         result = self._request("GET", f"/ncc/keywords/{keyword_id}")
         return dict(result or {})
+
+    def create_master_report(self, item: str) -> dict[str, Any]:
+        result = self._request(
+            "POST",
+            "/master-reports",
+            json_body={"item": str(item)},
+        )
+        return dict(result or {})
+
+    def get_master_report(self, report_id: str) -> dict[str, Any]:
+        result = self._request("GET", f"/master-reports/{report_id}")
+        return dict(result or {})
+
+    def download_master_report_text(self, download_url: str) -> str:
+        """Download a built Naver master report using the same signed API session."""
+        parsed = urlparse(str(download_url or ""))
+        uri = parsed.path or "/report-download"
+        if not uri.startswith("/"):
+            uri = "/" + uri
+        params = dict(parse_qsl(parsed.query, keep_blank_values=True))
+        url = self.config.base_url + uri
+
+        last_error: Exception | None = None
+        for attempt in range(self.max_retries):
+            elapsed = time.monotonic() - self._last_request_at
+            if elapsed < self.min_interval_seconds:
+                time.sleep(self.min_interval_seconds - elapsed)
+            try:
+                response = self.session.get(
+                    url,
+                    headers=self._headers("GET", uri),
+                    params=params,
+                    timeout=self.timeout,
+                )
+                self._last_request_at = time.monotonic()
+                if response.status_code >= 400:
+                    error = NaverSearchAdsError(
+                        f"GET {uri} failed ({response.status_code}): {response.text}"
+                    )
+                    if response.status_code in {429, 500, 502, 503, 504}:
+                        last_error = error
+                        time.sleep(min(2 ** attempt, 8))
+                        continue
+                    raise error
+                return response.content.decode("utf-8-sig", errors="replace")
+            except requests.RequestException as exc:
+                last_error = exc
+                time.sleep(min(2 ** attempt, 8))
+
+        if last_error is not None:
+            raise NaverSearchAdsError(str(last_error)) from last_error
+        raise NaverSearchAdsError("Master report download failed without response")
 
     def get_stats(
         self,
