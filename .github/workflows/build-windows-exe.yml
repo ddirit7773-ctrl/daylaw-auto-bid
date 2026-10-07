@@ -126,6 +126,32 @@ jobs:
           print("PRODUCTION GROUP SAFETY TEST OK")
           '@ | python -
 
+      - name: V15 production safety self test
+        shell: pwsh
+        run: |
+          @'
+          from auto_cleanup import group_allowances
+          from restricted_cleanup import parse_keyword_master_limited_ids
+
+          limited_row = ["1", "g1", "nkw-one", "kw1", "70", "", "", "0", "30", "1", "2026-01-01T00:00:00Z", "", "0"]
+          normal_row = ["1", "g1", "nkw-two", "kw2", "70", "", "", "0", "20", "1", "2026-01-01T00:00:00Z", "", "0"]
+          report = "\n".join(["\t".join(limited_row), "\t".join(normal_row)]) + "\n"
+          assert parse_keyword_master_limited_ids(report) == {"nkw-one"}
+
+          snapshot = {
+              "group_keyword_ids": {
+                  "g10": [str(i) for i in range(10)],
+                  "g5": [str(i) for i in range(5)],
+                  "g4": [str(i) for i in range(4)],
+              }
+          }
+          allowance = group_allowances(snapshot)
+          assert allowance["g10"] == 5
+          assert allowance["g5"] == 1
+          assert allowance["g4"] == 0
+          print("V15 PRODUCTION SAFETY TEST OK")
+          '@ | python -
+
       - name: Pre-delete archive journal self test
         shell: pwsh
         run: |
