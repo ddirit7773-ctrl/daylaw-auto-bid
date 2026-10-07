@@ -66,6 +66,26 @@ class DesktopAppV9(DesktopAppV8):
             except Exception:
                 self.production_dashboard_button.pack(fill="x", padx=20, pady=5)
 
+            self.production_dashboard_stop = ctk.CTkButton(
+                card,
+                text="안전 중지 요청",
+                height=38,
+                corner_radius=9,
+                fg_color="#475569",
+                hover_color="#334155",
+                state="disabled",
+                command=self._request_auto_stop,
+            )
+            try:
+                self.production_dashboard_stop.pack(
+                    fill="x",
+                    padx=20,
+                    pady=(2, 5),
+                    before=self.status_text,
+                )
+            except Exception:
+                self.production_dashboard_stop.pack(fill="x", padx=20, pady=(2, 5))
+
         # Delete queue: keep the legacy/test controls available, but put one
         # production button beside them so normal operation is a single action.
         if hasattr(self, "live_delete_button"):
@@ -80,6 +100,35 @@ class DesktopAppV9(DesktopAppV8):
                 command=self.run_production_cleanup,
             )
             self.production_queue_button.pack(side="right", padx=(8, 0))
+            self.production_queue_stop = ctk.CTkButton(
+                bar,
+                text="안전 중지",
+                width=100,
+                fg_color="#475569",
+                hover_color="#334155",
+                state="disabled",
+                command=self._request_auto_stop,
+            )
+            self.production_queue_stop.pack(side="right", padx=(8, 0))
+
+    def _set_auto_stop_state(self, state: str) -> None:
+        for name in ("production_dashboard_stop", "production_queue_stop"):
+            button = getattr(self, name, None)
+            if button is not None:
+                try:
+                    button.configure(state=state)
+                except Exception:
+                    pass
+
+    def _request_auto_stop(self) -> None:
+        stop_file = APP_ROOT / "data" / "state" / "auto_cleanup.stop"
+        stop_file.parent.mkdir(parents=True, exist_ok=True)
+        stop_file.write_text("stop\n", encoding="utf-8")
+        self._set_auto_stop_state("disabled")
+        messagebox.showinfo(
+            "안전 중지 요청",
+            "중지 요청을 전달했습니다.\n현재 DELETE가 진행 중이면 현재 항목/체크포인트를 안전하게 마무리한 뒤 중단합니다.",
+        )
 
     @staticmethod
     def _latest_auto_summary(max_age_seconds: int = 24 * 3600) -> dict[str, str] | None:
@@ -115,6 +164,7 @@ class DesktopAppV9(DesktopAppV8):
             "completed_ready_subset": "이번 실행의 안전 통과 후보를 모두 처리",
             "delete_error_limit_reached": "삭제 API 오류가 3건 발생해 안전 중단",
             "post_delete_verification_failed": "삭제 후 확인 실패가 발견되어 안전 중단",
+            "user_stop_requested": "사용자 안전 중지 요청으로 종료",
         }
         reason = row.get("stop_reason", "")
         return (
@@ -432,9 +482,11 @@ class DesktopAppV9(DesktopAppV8):
 
         self._auto_delete_started_at = 0.0
         self._auto_stage_started_at = time.monotonic()
+        self._set_auto_stop_state("normal")
         self._auto_stats_stage = ""
 
         def success() -> None:
+            self._set_auto_stop_state("disabled")
             self.refresh_dashboard()
             self.refresh_delete_queue()
             if hasattr(self, "refresh_history"):
@@ -446,6 +498,7 @@ class DesktopAppV9(DesktopAppV8):
             )
 
         def failure(detail: str) -> None:
+            self._set_auto_stop_state("disabled")
             self.refresh_dashboard()
             self.refresh_delete_queue()
             if hasattr(self, "refresh_history"):
