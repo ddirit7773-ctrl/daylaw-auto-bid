@@ -84,7 +84,6 @@ jobs:
         shell: pwsh
         run: |
           @'
-          import restricted_cleanup_v2  # applies LIMITED_APPROVED compatibility
           from restricted_cleanup import scan_restricted_candidate
 
           base = {
@@ -92,12 +91,13 @@ jobs:
               "age_days": "120",
               "campaign_status": "ELIGIBLE",
               "adgroup_status": "ELIGIBLE",
-              "keyword_status": "PAUSED",
+              "keyword_status": "ELIGIBLE",
               "inspect_status": "LIMITED_APPROVED",
           }
           assert scan_restricted_candidate(base) is True
+          assert scan_restricted_candidate({**base, "inspect_status": "30"}) is True
           assert scan_restricted_candidate({**base, "tier": "TYPE_CORE"}) is False
-          assert scan_restricted_candidate({**base, "keyword_status": "ELIGIBLE"}) is False
+          assert scan_restricted_candidate({**base, "inspect_status": "APPROVED"}) is False
           assert scan_restricted_candidate({**base, "inspect_status": "UNDER_REVIEW"}) is False
           assert scan_restricted_candidate({**base, "age_days": "89"}) is False
           print("RESTRICTED LANE LIMITED_APPROVED TEST OK")
