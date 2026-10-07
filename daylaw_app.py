@@ -51,6 +51,7 @@ BACKENDS = {
     "approve_immediate_20": "approve_immediate_20",
     "execute_v2_delete": "execute_v2_delete",
     "restricted_cleanup": "restricted_cleanup",
+    "auto_cleanup": "auto_cleanup",
     "query_account_stats": "query_account_stats",
     "restore_deleted_keyword": "restore_deleted_keyword",
 }
@@ -96,9 +97,10 @@ def _stdio_self_test() -> int:
 
 def main() -> int:
     if len(sys.argv) >= 2 and sys.argv[1] == "--self-test":
-        import desktop_app_v8  # noqa: F401
+        import desktop_app_v9  # noqa: F401
         import approve_immediate_20  # noqa: F401
         import restricted_cleanup  # noqa: F401
+        import auto_cleanup  # noqa: F401
         print("DAYLAW PACKAGED SELF TEST OK")
         return 0
 
@@ -124,9 +126,9 @@ def main() -> int:
     desktop_app_v3.ROOT_DIR = APP_ROOT
     desktop_app_v3.BACKUP_DIR = APP_ROOT / "data" / "backups"
 
-    from desktop_app_v8 import DesktopAppV8
+    from desktop_app_v9 import DesktopAppV9
 
-    app = DesktopAppV8()
+    app = DesktopAppV9()
     app.mainloop()
     return 0
 
