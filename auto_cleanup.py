@@ -648,8 +648,8 @@ def run_cleanup(*, live: bool) -> int:
 
     final_ready.sort(
         key=lambda row: (
-            row.get("adgroup_id", ""),
             0 if row.get("_lane") == "RESTRICTED" else 1,
+            row.get("adgroup_id", ""),
             -as_int(row.get("age_days")),
             row.get("keyword", ""),
         )
@@ -685,26 +685,74 @@ def run_cleanup(*, live: bool) -> int:
                 stop_reason = "cleanup_stop_reached"
                 break
 
-            # A full-run group cap was already applied. Re-read every group touched
-            # by this checkpoint to ensure it still keeps at least four survivors.
+            # Re-read the exact groups touched by this checkpoint. Long production
+            # runs can last many minutes, so keyword status/text is checked again
+            # immediately before DELETE rather than trusting the earlier snapshot.
             chunk_by_group: Counter[str] = Counter(
                 str(row.get("adgroup_id", "")) for row in chunk
             )
-            for gid, planned in chunk_by_group.items():
-                current_total = len(client.get_keywords(gid))
+            checkpoint_keywords: dict[str, dict] = {}
+            checkpoint_group_ids: dict[str, list[str]] = {}
+            for gid in chunk_by_group:
+                current_rows = client.get_keywords(gid)
+                checkpoint_group_ids[gid] = []
+                for current in current_rows:
+                    kid = str(current.get("nccKeywordId", "")).strip()
+                    if kid:
+                        checkpoint_keywords[kid] = current
+                        checkpoint_group_ids[gid].append(kid)
+
+            checkpoint_snapshot = {
+                "campaigns": final_snapshot["campaigns"],
+                "adgroups": final_snapshot["adgroups"],
+                "keywords": checkpoint_keywords,
+                "group_keyword_ids": checkpoint_group_ids,
+                "total_keywords": final_live_count,
+            }
+            checkpoint_ready: list[dict[str, str]] = []
+            for row in chunk:
+                kid = str(row.get("keyword_id", ""))
+                ok, reason = candidate_current_ok(
+                    row=row,
+                    lane=str(row.get("_lane", "GENERAL")),
+                    snapshot=checkpoint_snapshot,
+                    policy=policy,
+                    permanent_keywords=permanent_keywords,
+                    type_keywords=type_keywords,
+                    limited_ids=final_limited_ids,
+                )
+                if ok:
+                    checkpoint_ready.append(row)
+                else:
+                    update_manifest(
+                        manifest_by_id,
+                        kid,
+                        gate_result="HOLD",
+                        gate_reason="checkpoint:" + reason,
+                    )
+
+            checkpoint_by_group: Counter[str] = Counter(
+                str(row.get("adgroup_id", "")) for row in checkpoint_ready
+            )
+            for gid, planned in checkpoint_by_group.items():
+                current_total = len(checkpoint_group_ids.get(gid, []))
+                if planned > math.floor(current_total * PER_GROUP_DELETE_CAP):
+                    raise SystemExit(
+                        f"[SAFE STOP] Group {gid} would exceed the 50% checkpoint delete cap."
+                    )
                 if current_total - planned < MIN_GROUP_SURVIVORS:
                     raise SystemExit(
                         f"[SAFE STOP] Group {gid} would fall below {MIN_GROUP_SURVIVORS} survivors."
                     )
 
             deleted_by_group: defaultdict[str, list[str]] = defaultdict(list)
-            for row in chunk:
+            for row in checkpoint_ready:
                 if final_live_count <= policy.cleanup_stop:
                     stop_reason = "cleanup_stop_reached"
                     break
 
                 kid = str(row.get("keyword_id", ""))
-                current = final_snapshot["keywords"].get(kid, {})  # type: ignore[index]
+                current = checkpoint_keywords.get(kid, {})
                 identity_key = "|".join(
                     (
                         str(row.get("campaign_id", "")),
