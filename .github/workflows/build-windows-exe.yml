@@ -24,7 +24,7 @@ jobs:
       - name: Compile check
         shell: pwsh
         run: |
-          python -m py_compile daylaw_app.py daylaw_app_v12_hotfix.py desktop_app.py desktop_app_v2.py desktop_app_v3.py desktop_app_v4.py desktop_app_v5.py desktop_app_v6.py desktop_app_v7.py desktop_app_v8.py approve_immediate_20.py approve_immediate_partial.py restricted_cleanup.py restricted_cleanup_v2.py restore_deleted_keyword.py query_account_stats.py execute_v2_delete.py run_v2_scan.py src/keyword_cleaner/naver_api.py src/keyword_cleaner/stats_v2.py src/keyword_cleaner/policy_v2.py src/keyword_cleaner/live_safety.py src/keyword_cleaner/lifecycle_store.py
+          python -m py_compile daylaw_app.py daylaw_app_v12_hotfix.py desktop_app.py desktop_app_v2.py desktop_app_v3.py desktop_app_v4.py desktop_app_v5.py desktop_app_v6.py desktop_app_v7.py desktop_app_v8.py desktop_app_v9.py auto_cleanup.py approve_immediate_20.py approve_immediate_partial.py restricted_cleanup.py restricted_cleanup_v2.py restore_deleted_keyword.py query_account_stats.py execute_v2_delete.py run_v2_scan.py src/keyword_cleaner/naver_api.py src/keyword_cleaner/stats_v2.py src/keyword_cleaner/policy_v2.py src/keyword_cleaner/live_safety.py src/keyword_cleaner/lifecycle_store.py
 
       - name: GUI empty-data regression self test
         shell: pwsh
