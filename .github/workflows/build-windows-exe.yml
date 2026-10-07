@@ -152,6 +152,60 @@ jobs:
           print("V15 PRODUCTION SAFETY TEST OK")
           '@ | python -
 
+      - name: V15 master-fallback age gate self test
+        shell: pwsh
+        run: |
+          @'
+          from auto_cleanup import build_candidate_pool
+          from src.keyword_cleaner.policy_v2 import CleanerPolicy
+
+          policy = CleanerPolicy.load()
+          def row(kid, age):
+              return {
+                  "keyword_id": kid,
+                  "keyword": "테스트" + kid,
+                  "campaign_id": "c1",
+                  "campaign_name": "c",
+                  "adgroup_id": "g1",
+                  "adgroup_name": "업체",
+                  "tier": "GENERAL",
+                  "status": "DELETE_PENDING",
+                  "exposure_eligible": "True",
+                  "age_days": str(age),
+              }
+
+          snapshot = {
+              "campaigns": {"c1": {"status": "ELIGIBLE", "userLock": False}},
+              "adgroups": {"g1": {"status": "ELIGIBLE", "userLock": False, "name": "업체"}},
+              "keywords": {
+                  "young": {
+                      "nccKeywordId": "young", "nccAdgroupId": "g1",
+                      "keyword": "테스트young", "status": "ELIGIBLE",
+                      "inspectStatus": "APPROVED", "userLock": False,
+                  },
+                  "old": {
+                      "nccKeywordId": "old", "nccAdgroupId": "g1",
+                      "keyword": "테스트old", "status": "ELIGIBLE",
+                      "inspectStatus": "APPROVED", "userLock": False,
+                  },
+              },
+              "group_keyword_ids": {"g1": ["young", "old", "s1", "s2", "s3", "s4"]},
+              "total_keywords": 6,
+          }
+          selected, _ = build_candidate_pool(
+              scan_rows=[row("young", 60), row("old", 120)],
+              snapshot=snapshot,
+              limited_ids=set(),
+              policy=policy,
+              permanent_keywords=[],
+              type_keywords=[],
+              reserve_limit=10,
+              master_available=False,
+          )
+          assert [r["keyword_id"] for r in selected] == ["old"]
+          print("V15 MASTER FALLBACK AGE GATE TEST OK")
+          '@ | python -
+
       - name: Pre-delete archive journal self test
         shell: pwsh
         run: |
