@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import io
 import math
 import time
 from collections import Counter, defaultdict
@@ -28,6 +29,8 @@ MIN_RESTRICTED_AGE_DAYS = 90
 MAX_BATCH = 20
 PER_GROUP_DELETE_CAP = 0.50
 MIN_GROUP_SURVIVORS = 4
+MASTER_REPORT_MAX_WAIT_SECONDS = 180
+MASTER_REPORT_POLL_SECONDS = 3
 
 REVIEW_FIELDS = [
     "checked_at",
@@ -117,22 +120,112 @@ def is_limited_inspect_status(value: object) -> bool:
     return text_upper(value) in {"LIMITED_APPROVED", "30"}
 
 
-def scan_restricted_candidate(row: dict[str, str]) -> bool:
-    """Conservative discovery from the latest V2 scan.
+def scan_restricted_candidate(
+    row: dict[str, str],
+    limited_keyword_ids: set[str] | None = None,
+) -> bool:
+    """Conservative restricted-keyword candidate gate.
 
-    The special lane is identified by LIMITED_APPROVED / 30 itself. Parent
-    campaign/adgroup must be healthy; only old GENERAL keywords are considered.
-    Keyword status is intentionally not required to be non-ELIGIBLE because the
-    API can report an otherwise eligible keyword while its inspect status carries
-    the exposure restriction.
+    The normal /ncc/keywords response does not reliably expose the same
+    "키워드 노출 제한" signal shown in the advertiser UI.  When a Keyword
+    master report is available, its Ad Keyword Inspect Status=30
+    (LIMITED_APPROVED) is the authoritative membership signal.
     """
-    return bool(
+    base_ok = bool(
         row.get("tier") == "GENERAL"
         and as_int(row.get("age_days")) >= MIN_RESTRICTED_AGE_DAYS
         and text_upper(row.get("campaign_status")) == "ELIGIBLE"
         and text_upper(row.get("adgroup_status")) == "ELIGIBLE"
-        and is_limited_inspect_status(row.get("inspect_status"))
     )
+    if not base_ok:
+        return False
+    if limited_keyword_ids is not None:
+        return str(row.get("keyword_id", "")).strip() in limited_keyword_ids
+    return is_limited_inspect_status(row.get("inspect_status"))
+
+
+def parse_keyword_master_limited_ids(text: str) -> set[str]:
+    """Parse Naver Keyword master TSV and return active LIMITED_APPROVED IDs."""
+    rows = [row for row in csv.reader(io.StringIO(text), delimiter="\t") if row]
+    if not rows:
+        return set()
+
+    first = [str(cell or "").strip() for cell in rows[0]]
+    lower = [cell.lower() for cell in first]
+    has_header = any("keyword id" in cell for cell in lower) and any(
+        "inspect status" in cell for cell in lower
+    )
+
+    if has_header:
+        def find_index(*needles: str) -> int | None:
+            for idx, cell in enumerate(lower):
+                if all(needle in cell for needle in needles):
+                    return idx
+            return None
+
+        id_idx = find_index("keyword", "id")
+        inspect_idx = find_index("inspect", "status")
+        del_idx = find_index("del")
+        data_rows = rows[1:]
+    else:
+        # Official Keyword master specification:
+        # 0 customer, 1 adgroup, 2 keyword id, 3 keyword, ...,
+        # 8 inspect status, 11 deleted time.
+        id_idx, inspect_idx, del_idx = 2, 8, 11
+        data_rows = rows
+
+    if id_idx is None or inspect_idx is None:
+        raise NaverSearchAdsError("Keyword master report columns could not be identified.")
+
+    limited: set[str] = set()
+    for row in data_rows:
+        if max(id_idx, inspect_idx) >= len(row):
+            continue
+        keyword_id = str(row[id_idx] or "").strip()
+        inspect = str(row[inspect_idx] or "").strip()
+        deleted = (
+            str(row[del_idx] or "").strip()
+            if del_idx is not None and del_idx < len(row)
+            else ""
+        )
+        if keyword_id and not deleted and is_limited_inspect_status(inspect):
+            limited.add(keyword_id)
+    return limited
+
+
+def load_limited_keyword_ids_from_master(
+    client: NaverSearchAdsClient,
+) -> set[str]:
+    """Build and download the current Keyword master report."""
+    job = client.create_master_report("Keyword")
+    report_id = str(job.get("id", "")).strip()
+    if not report_id:
+        raise NaverSearchAdsError("Keyword master report job id was not returned.")
+
+    started = time.monotonic()
+    current = job
+    while True:
+        status = text_upper(current.get("status"))
+        elapsed = int(time.monotonic() - started)
+        print(f"@@RESTRICTED_MASTER_PROGRESS|{status or 'WAITING'}|{elapsed}", flush=True)
+
+        if status == "BUILT":
+            download_url = str(current.get("downloadUrl", "")).strip()
+            if not download_url:
+                raise NaverSearchAdsError("Built Keyword master report has no download URL.")
+            report_text = client.download_master_report_text(download_url)
+            limited = parse_keyword_master_limited_ids(report_text)
+            print(f"Restricted master IDs     : {len(limited):,}", flush=True)
+            return limited
+        if status == "NONE":
+            return set()
+        if status == "ERROR":
+            raise NaverSearchAdsError("Keyword master report build failed.")
+        if elapsed >= MASTER_REPORT_MAX_WAIT_SECONDS:
+            raise NaverSearchAdsError("Keyword master report build timed out.")
+
+        time.sleep(MASTER_REPORT_POLL_SECONDS)
+        current = client.get_master_report(report_id)
 
 
 def load_policy_and_manual() -> tuple[CleanerPolicy, list[str], list[str]]:
@@ -174,6 +267,7 @@ def restricted_live_gate(
     adgroups: dict[str, dict],
     permanent_keywords: list[str],
     type_keywords: list[str],
+    limited_keyword_ids: set[str],
 ) -> tuple[bool, str, dict | None, int | None, int | None]:
     kid = str(row.get("keyword_id", "")).strip()
     try:
@@ -201,12 +295,10 @@ def restricted_live_gate(
     if current.get("userLock") is True:
         return False, "keyword_user_locked", current, None, None
 
-    # The exposure restriction is carried by inspectStatus 30 /
-    # LIMITED_APPROVED. Do not require ordinary keyword status to be PAUSED:
-    # Naver can keep status ELIGIBLE while inspectStatus represents the limit.
-    inspect_status = text_upper(current.get("inspectStatus"))
-    if not is_limited_inspect_status(inspect_status):
-        return False, f"restriction_cleared:{inspect_status or 'UNKNOWN'}", current, None, None
+    # The normal keyword API does not reliably mirror the UI's exposure-limit
+    # flag. Revalidate membership against a freshly built Keyword master report.
+    if kid not in limited_keyword_ids:
+        return False, "restriction_not_in_master", current, None, None
 
     current_tier, tier_reason = keyword_tier(
         adgroup_name=str(adgroup.get("name", "")),
@@ -254,7 +346,14 @@ def run_review(max_items: int) -> int:
         )
 
     scan_rows = read_csv(scan_path)
-    candidates = [row for row in scan_rows if scan_restricted_candidate(row)]
+    client = NaverSearchAdsClient(NaverConfig.from_env(), min_interval_seconds=0.20)
+    print("[MASTER] Building Keyword master report to identify exposure-limited keywords...", flush=True)
+    limited_keyword_ids = load_limited_keyword_ids_from_master(client)
+    candidates = [
+        row
+        for row in scan_rows
+        if scan_restricted_candidate(row, limited_keyword_ids)
+    ]
     candidates.sort(
         key=lambda row: (
             -as_int(row.get("age_days")),
@@ -285,7 +384,6 @@ def run_review(max_items: int) -> int:
         return 0
 
     policy, permanent_keywords, type_keywords = load_policy_and_manual()
-    client = NaverSearchAdsClient(NaverConfig.from_env(), min_interval_seconds=0.20)
     campaigns, adgroups = current_maps(client, selected)
 
     selected_by_group = Counter(row.get("adgroup_id", "") for row in selected)
@@ -315,6 +413,7 @@ def run_review(max_items: int) -> int:
                 adgroups=adgroups,
                 permanent_keywords=permanent_keywords,
                 type_keywords=type_keywords,
+                limited_keyword_ids=limited_keyword_ids,
             )
         current = current or {}
         audit.append(
@@ -367,6 +466,8 @@ def run_delete(max_items: int) -> int:
 
     policy, permanent_keywords, type_keywords = load_policy_and_manual()
     client = NaverSearchAdsClient(NaverConfig.from_env(), min_interval_seconds=0.20)
+    print("[MASTER] Rebuilding Keyword master report for final exposure-limit confirmation...", flush=True)
+    limited_keyword_ids = load_limited_keyword_ids_from_master(client)
     campaigns, adgroups = current_maps(client, ready_rows)
 
     final_ready: list[tuple[dict[str, str], dict]] = []
@@ -380,6 +481,7 @@ def run_delete(max_items: int) -> int:
             adgroups=adgroups,
             permanent_keywords=permanent_keywords,
             type_keywords=type_keywords,
+            limited_keyword_ids=limited_keyword_ids,
         )
         row["history_impressions"] = "" if imp90 is None else str(imp90)
         row["history_clicks"] = "" if clk90 is None else str(clk90)
@@ -446,7 +548,7 @@ def run_delete(max_items: int) -> int:
                 "restricted_lane": {
                     "minimum_age_days": MIN_RESTRICTED_AGE_DAYS,
                     "required_history_days": policy.reference_history_days,
-                    "required_signature": "keyword_status_not_eligible_and_inspect_approved",
+                    "required_signature": "keyword_master_inspect_status_30_and_90d_zero",
                 },
             }
 
