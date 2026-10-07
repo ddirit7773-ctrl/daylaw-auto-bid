@@ -23,6 +23,7 @@ class DesktopAppV9(DesktopAppV8):
         self._auto_stage_started_at = 0.0
         self._auto_delete_started_at = 0.0
         self._auto_stats_stage = ""
+        self._auto_run_started_wall = 0.0
         super().__init__()
         self._retag_v15(self.sidebar)
         self._add_production_cleanup_buttons()
@@ -46,9 +47,10 @@ class DesktopAppV9(DesktopAppV8):
         # Dashboard: make the production flow the primary action.
         if hasattr(self, "status_text"):
             card = self.status_text.master
+            policy = CleanerPolicy.load()
             self.production_dashboard_button = ctk.CTkButton(
                 card,
-                text="전체 안전 정리  ·  스캔부터 82,000개까지 자동",
+                text=f"전체 안전 정리  ·  스캔부터 {policy.cleanup_stop:,}개까지 자동",
                 height=50,
                 corner_radius=10,
                 fg_color="#B91C1C",
@@ -150,14 +152,31 @@ class DesktopAppV9(DesktopAppV8):
             "중지 요청을 전달했습니다.\n현재 DELETE가 진행 중이면 현재 항목/체크포인트를 안전하게 마무리한 뒤 중단합니다.",
         )
 
+    def refresh_dashboard(self) -> None:
+        super().refresh_dashboard()
+        button = getattr(self, "production_dashboard_button", None)
+        if button is not None:
+            try:
+                policy = CleanerPolicy.load()
+                button.configure(
+                    text=f"전체 안전 정리  ·  스캔부터 {policy.cleanup_stop:,}개까지 자동"
+                )
+            except Exception:
+                pass
+
     @staticmethod
-    def _latest_auto_summary(max_age_seconds: int = 24 * 3600) -> dict[str, str] | None:
+    def _latest_auto_summary(
+        max_age_seconds: int = 24 * 3600,
+        min_mtime: float = 0.0,
+    ) -> dict[str, str] | None:
         folder = APP_ROOT / "data" / "delete_audit"
         files = sorted(folder.glob("auto_cleanup_summary_*.csv"), key=lambda p: p.stat().st_mtime)
         if not files:
             return None
         latest = files[-1]
         if time.time() - latest.stat().st_mtime > max_age_seconds:
+            return None
+        if min_mtime and latest.stat().st_mtime < min_mtime:
             return None
         try:
             with latest.open("r", encoding="utf-8-sig", newline="") as fp:
@@ -174,13 +193,14 @@ class DesktopAppV9(DesktopAppV8):
             return 0
 
     def _auto_summary_text(self) -> str:
-        row = self._latest_auto_summary()
+        row = self._latest_auto_summary(min_mtime=self._auto_run_started_wall)
         if not row:
             return "자동 정리 결과 요약 파일을 찾지 못했습니다."
 
+        cleanup_stop = self._num(row.get("cleanup_stop"))
         stop_map = {
-            "cleanup_stop_reached": "82,000개 정리 목표에 도달",
-            "cleanup_stop_reached_after_recount": "최종 실시간 재확인 후 82,000개 목표에 도달",
+            "cleanup_stop_reached": f"{cleanup_stop:,}개 정리 목표에 도달",
+            "cleanup_stop_reached_after_recount": f"최종 실시간 재확인 후 {cleanup_stop:,}개 목표에 도달",
             "completed_ready_subset": "이번 실행의 안전 통과 후보를 모두 처리",
             "delete_error_limit_reached": "삭제 API 오류가 3건 발생해 안전 중단",
             "post_delete_verification_failed": "삭제 후 확인 실패가 발견되어 안전 중단",
@@ -252,6 +272,27 @@ class DesktopAppV9(DesktopAppV8):
             )
             return
 
+        auto_master = re.match(r"@@AUTO_MASTER_STATUS\|([^|]+)\|([^|]+)\|(\d+)", text)
+        if auto_master:
+            phase, status, value = auto_master.groups()
+            phase_ko = "1차" if phase == "INITIAL" else "최종"
+            if status == "OK":
+                self.progress_detail.configure(
+                    text=f"{phase_ko} 노출제한 목록 확인 완료 · {int(value):,}개"
+                )
+            elif status == "RETRY":
+                self.progress_detail.configure(
+                    text=f"{phase_ko} 노출제한 목록 서버 오류 · 자동 재시도 {value}회차"
+                )
+            elif status == "SKIP":
+                self.progress_detail.configure(
+                    text=(
+                        f"{phase_ko} 노출제한 목록을 확인하지 못해 해당 전용 삭제는 보류하고 "
+                        "90일 이상 일반 키워드 정리만 계속합니다."
+                    )
+                )
+            return
+
         master = re.match(r"@@RESTRICTED_MASTER_PROGRESS\|([^|]+)\|(\d+)", text)
         if master:
             status, elapsed = master.groups()
@@ -265,6 +306,12 @@ class DesktopAppV9(DesktopAppV8):
             }.get(status, status)
             self.progress_detail.configure(
                 text=f"네이버 키워드 마스터 보고서 {ko} · {int(elapsed):,}초 경과"
+            )
+            return
+
+        if text.startswith("[MASTER SAFE HOLD]") or text.startswith("[FALLBACK]"):
+            self.progress_detail.configure(
+                text="네이버 노출제한 보고서 일시 오류 · 노출제한 전용 후보는 보류하고 일반 안전정리를 계속합니다."
             )
             return
 
@@ -532,6 +579,7 @@ class DesktopAppV9(DesktopAppV8):
 
         self._auto_delete_started_at = 0.0
         self._auto_stage_started_at = time.monotonic()
+        self._auto_run_started_wall = time.time()
         self._set_auto_stop_state("normal")
         self._auto_stats_stage = ""
 
@@ -553,13 +601,21 @@ class DesktopAppV9(DesktopAppV8):
             self.refresh_delete_queue()
             if hasattr(self, "refresh_history"):
                 self.refresh_history()
-            summary = self._auto_summary_text()
+            row = self._latest_auto_summary(min_mtime=self._auto_run_started_wall)
+            if row:
+                summary = self._auto_summary_text()
+                deleted = self._num(row.get("deleted"))
+                extra = (
+                    "\n\n이번 실행에서 실제 삭제된 항목이 있으므로 삭제 기록 / 복원을 확인해주세요."
+                    if deleted > 0
+                    else "\n\n이번 실행에서는 실제 삭제가 기록되지 않았습니다."
+                )
+            else:
+                summary = "이번 실행의 최종 요약이 생성되기 전에 안전중단되었습니다."
+                extra = "\n\n삭제 기록 / 복원에서 실제 삭제 여부를 확인해주세요."
             messagebox.showwarning(
                 "전체 안전 정리 안전중단",
-                summary
-                + "\n\n일부 키워드는 이미 정상 삭제됐을 수 있습니다. "
-                "삭제 기록 / 복원과 감사 로그를 확인해주세요.\n\n"
-                + (detail[-1000:] if detail else ""),
+                summary + extra + "\n\n" + (detail[-1000:] if detail else ""),
             )
 
         self._start_stream_job(
