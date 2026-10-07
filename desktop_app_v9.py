@@ -258,7 +258,11 @@ class DesktopAppV9(DesktopAppV8):
                 title = "삭제 직전 계정 구조 확인"
             else:
                 start, end = 96, 98
-                title = "82,000개 하한선 최종 재확인"
+                try:
+                    floor = CleanerPolicy.load().cleanup_stop
+                    title = f"{floor:,}개 하한선 최종 재확인"
+                except Exception:
+                    title = "정리 하한선 최종 재확인"
             pct = start + ratio * (end - start)
             elapsed = max(now - self._auto_stage_started_at, 0.1)
             remaining = elapsed * max(total - done, 0) / max(done, 1)
