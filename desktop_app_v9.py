@@ -90,6 +90,26 @@ class DesktopAppV9(DesktopAppV8):
         # production button beside them so normal operation is a single action.
         if hasattr(self, "live_delete_button"):
             bar = self.live_delete_button.master
+            # v15 is the production path. Keep legacy functions in code for
+            # recovery/debugging, but remove the old 20-item test controls from
+            # the normal operator screen so there is one obvious delete action.
+            for child in list(bar.winfo_children()):
+                try:
+                    text = str(child.cget("text") or "")
+                except Exception:
+                    continue
+                if (
+                    text.startswith("즉시 20개")
+                    or text.startswith("노출제한 20개")
+                    or text.startswith("노출제한 실제삭제")
+                    or text.startswith("실제 삭제 · 최대 20개")
+                    or text == "삭제 실행기 DRY RUN"
+                ):
+                    try:
+                        child.pack_forget()
+                    except Exception:
+                        pass
+
             self.production_queue_button = ctk.CTkButton(
                 bar,
                 text="전체 안전 정리",
