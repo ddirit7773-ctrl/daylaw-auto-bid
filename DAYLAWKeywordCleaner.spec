@@ -17,6 +17,7 @@ hiddenimports = [
     "execute_v2_delete",
     "restricted_cleanup",
     "restricted_cleanup_v2",
+    "auto_cleanup",
     "query_account_stats",
     "restore_deleted_keyword",
     "desktop_app",
@@ -27,6 +28,7 @@ hiddenimports = [
     "desktop_app_v6",
     "desktop_app_v7",
     "desktop_app_v8",
+    "desktop_app_v9",
     "tzdata",
     "tzdata.zoneinfo",
 ]
