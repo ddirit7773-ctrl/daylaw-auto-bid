@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import csv
 import io
+import json
 import math
 import time
 from collections import Counter, defaultdict
@@ -31,6 +32,8 @@ PER_GROUP_DELETE_CAP = 0.50
 MIN_GROUP_SURVIVORS = 4
 MASTER_REPORT_MAX_WAIT_SECONDS = 180
 MASTER_REPORT_POLL_SECONDS = 3
+MASTER_CACHE_PATH = Path("data/state/restricted_master_cache.json")
+MASTER_CACHE_MAX_AGE_SECONDS = 24 * 60 * 60
 
 REVIEW_FIELDS = [
     "checked_at",
@@ -193,6 +196,33 @@ def parse_keyword_master_limited_ids(text: str) -> set[str]:
     return limited
 
 
+def _save_master_cache(ids: set[str]) -> None:
+    MASTER_CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "saved_at": time.time(),
+        "keyword_ids": sorted(ids),
+    }
+    temp = MASTER_CACHE_PATH.with_suffix(".tmp")
+    temp.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+    temp.replace(MASTER_CACHE_PATH)
+
+
+def _load_master_cache(max_age_seconds: int = MASTER_CACHE_MAX_AGE_SECONDS) -> set[str] | None:
+    if not MASTER_CACHE_PATH.exists():
+        return None
+    try:
+        payload = json.loads(MASTER_CACHE_PATH.read_text(encoding="utf-8"))
+        saved_at = float(payload.get("saved_at") or 0)
+        if time.time() - saved_at > max_age_seconds:
+            return None
+        ids = payload.get("keyword_ids")
+        if not isinstance(ids, list):
+            return None
+        return {str(value).strip() for value in ids if str(value).strip()}
+    except (OSError, ValueError, TypeError, json.JSONDecodeError):
+        return None
+
+
 def load_limited_keyword_ids_from_master(
     client: NaverSearchAdsClient,
 ) -> set[str]:
@@ -215,9 +245,11 @@ def load_limited_keyword_ids_from_master(
                 raise NaverSearchAdsError("Built Keyword master report has no download URL.")
             report_text = client.download_master_report_text(download_url)
             limited = parse_keyword_master_limited_ids(report_text)
+            _save_master_cache(limited)
             print(f"Restricted master IDs     : {len(limited):,}", flush=True)
             return limited
         if status == "NONE":
+            _save_master_cache(set())
             return set()
         if status == "ERROR":
             raise NaverSearchAdsError("Keyword master report build failed.")
@@ -227,6 +259,39 @@ def load_limited_keyword_ids_from_master(
         time.sleep(MASTER_REPORT_POLL_SECONDS)
         current = client.get_master_report(report_id)
 
+
+def load_limited_keyword_ids_resilient(
+    client: NaverSearchAdsClient,
+    *,
+    attempts: int = 3,
+    cache_max_age_seconds: int = MASTER_CACHE_MAX_AGE_SECONDS,
+) -> tuple[set[str], str]:
+    """Retry NAVER master creation/download, then use a fresh cache if available."""
+    last_error: Exception | None = None
+    attempts = max(int(attempts), 1)
+    for attempt in range(1, attempts + 1):
+        try:
+            ids = load_limited_keyword_ids_from_master(client)
+            print(f"@@RESTRICTED_MASTER_SOURCE|LIVE|{len(ids)}", flush=True)
+            return ids, "LIVE"
+        except NaverSearchAdsError as exc:
+            last_error = exc
+            print(
+                f"@@RESTRICTED_MASTER_RETRY|{attempt}|{attempts}|{str(exc)[:300]}",
+                flush=True,
+            )
+            if attempt < attempts:
+                time.sleep(min(5 * attempt, 15))
+
+    cached = _load_master_cache(cache_max_age_seconds)
+    if cached is not None:
+        print(f"@@RESTRICTED_MASTER_SOURCE|CACHE|{len(cached)}", flush=True)
+        return cached, "CACHE"
+
+    print("@@RESTRICTED_MASTER_SOURCE|UNAVAILABLE|0", flush=True)
+    if last_error is not None:
+        print(f"[MASTER FALLBACK] {last_error}", flush=True)
+    return set(), "UNAVAILABLE"
 
 def load_policy_and_manual() -> tuple[CleanerPolicy, list[str], list[str]]:
     policy = CleanerPolicy.load()
