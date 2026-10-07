@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import csv
+import json
 import re
+import sqlite3
 import time
 from pathlib import Path
 from tkinter import messagebox
@@ -10,6 +12,7 @@ import customtkinter as ctk
 
 from desktop_app_v4 import APP_ROOT
 from desktop_app_v8 import DesktopAppV8
+from src.keyword_cleaner.lifecycle_store import DEFAULT_DB_PATH
 from src.keyword_cleaner.policy_v2 import CleanerPolicy
 
 
@@ -23,6 +26,11 @@ class DesktopAppV9(DesktopAppV8):
         super().__init__()
         self._retag_v15(self.sidebar)
         self._add_production_cleanup_buttons()
+        if hasattr(self, "history_tree"):
+            try:
+                self.history_tree.heading("state", text="삭제 / 복원 상태")
+            except Exception:
+                pass
 
     def _retag_v15(self, widget) -> None:
         for child in widget.winfo_children():
@@ -292,6 +300,102 @@ class DesktopAppV9(DesktopAppV8):
                 text=f"안전 고속 통계 · {fast.group(1)}개 동시 · {fast.group(2)}개/배치 · {int(fast.group(3)):,}배치"
             )
             return
+
+    def refresh_history(self) -> None:
+        if not hasattr(self, "history_tree"):
+            return
+        for item in self.history_tree.get_children():
+            self.history_tree.delete(item)
+        self.history_rows = []
+        if not DEFAULT_DB_PATH.exists():
+            self.history_summary.configure(text="삭제 완료 0개")
+            return
+
+        conn = sqlite3.connect(DEFAULT_DB_PATH)
+        conn.row_factory = sqlite3.Row
+        try:
+            rows = conn.execute(
+                "SELECT * FROM keyword_archive ORDER BY archive_id DESC LIMIT 5000"
+            ).fetchall()
+        finally:
+            conn.close()
+
+        state_ko = {
+            "PREPARED": "삭제 전 백업",
+            "DELETE_REQUESTED": "삭제 요청 중",
+            "DELETE_API_OK": "삭제 응답 완료 · 검증대기",
+            "DELETED_VERIFIED": "삭제 완료",
+            "DELETE_FAILED": "삭제 실패",
+            "VERIFY_FAILED": "삭제 후 확인 실패",
+        }
+
+        for dbrow in rows:
+            row = dict(dbrow)
+            try:
+                payload = json.loads(row.get("payload_json") or "{}")
+            except json.JSONDecodeError:
+                payload = {}
+            plan = payload.get("plan") or {}
+            delete_status = str(row.get("delete_status") or "DELETED_VERIFIED")
+            restored_at = str(row.get("restored_at") or "")
+            state = state_ko.get(delete_status, delete_status)
+            if restored_at:
+                state += " · 복원 완료"
+            elif delete_status == "DELETED_VERIFIED":
+                state += " · 미복원"
+
+            item = {
+                "archive_id": str(row.get("archive_id", "")),
+                "deleted_at": str(row.get("deleted_at", "")),
+                "campaign_name": str(plan.get("campaign_name") or row.get("campaign_id") or ""),
+                "adgroup_name": str(plan.get("adgroup_name") or row.get("adgroup_id") or ""),
+                "keyword": str(row.get("keyword") or ""),
+                "restored_at": restored_at,
+                "delete_status": delete_status,
+            }
+            self.history_rows.append(item)
+            self.history_tree.insert(
+                "",
+                "end",
+                iid=item["archive_id"],
+                values=(
+                    item["archive_id"],
+                    item["deleted_at"],
+                    item["campaign_name"],
+                    item["adgroup_name"],
+                    item["keyword"],
+                    state,
+                ),
+            )
+
+        deleted = sum(1 for row in self.history_rows if row["delete_status"] == "DELETED_VERIFIED")
+        attention = sum(
+            1
+            for row in self.history_rows
+            if row["delete_status"] in {"DELETE_FAILED", "VERIFY_FAILED", "DELETE_REQUESTED", "DELETE_API_OK"}
+        )
+        restored = sum(1 for row in self.history_rows if row["restored_at"])
+        self.history_summary.configure(
+            text=f"삭제 완료 {deleted:,}개 · 확인 필요 {attention:,}개 · 복원 완료 {restored:,}개"
+        )
+
+    def restore_selected(self, live: bool) -> None:
+        selected = self.history_tree.selection()
+        if len(selected) != 1:
+            messagebox.showwarning("선택 필요", "복원할 기록 1개를 선택해주세요.")
+            return
+        archive_id = selected[0]
+        row = next((item for item in self.history_rows if item["archive_id"] == archive_id), None)
+        if not row:
+            messagebox.showerror("복원 실패", "선택한 archive 정보를 찾을 수 없습니다.")
+            return
+        if row.get("delete_status") != "DELETED_VERIFIED":
+            messagebox.showwarning(
+                "복원 대상 아님",
+                "삭제 완료와 사후검증까지 확인된 항목만 복원할 수 있습니다.",
+            )
+            return
+        super().restore_selected(live)
 
     def run_production_cleanup(self) -> None:
         if self.backend_running:
