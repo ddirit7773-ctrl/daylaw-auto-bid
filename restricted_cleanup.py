@@ -107,20 +107,31 @@ def text_upper(value: object) -> str:
     return str(value or "").strip().upper()
 
 
+def is_limited_inspect_status(value: object) -> bool:
+    """Return True for Naver's keyword exposure-limit inspection state.
+
+    Naver exposes the keyword-level restriction through Ad Keyword Inspect
+    Status 30 / LIMITED_APPROVED.  The keyword's ordinary status may still be
+    ELIGIBLE, so that field must not be used to discover this special lane.
+    """
+    return text_upper(value) in {"LIMITED_APPROVED", "30"}
+
+
 def scan_restricted_candidate(row: dict[str, str]) -> bool:
     """Conservative discovery from the latest V2 scan.
 
-    Only rows where parent structures were healthy, the keyword itself was not
-    ELIGIBLE, inspection was already APPROVED, the keyword is GENERAL, and the
-    keyword is at least 90 days old are considered.
+    The special lane is identified by LIMITED_APPROVED / 30 itself. Parent
+    campaign/adgroup must be healthy; only old GENERAL keywords are considered.
+    Keyword status is intentionally not required to be non-ELIGIBLE because the
+    API can report an otherwise eligible keyword while its inspect status carries
+    the exposure restriction.
     """
     return bool(
         row.get("tier") == "GENERAL"
         and as_int(row.get("age_days")) >= MIN_RESTRICTED_AGE_DAYS
         and text_upper(row.get("campaign_status")) == "ELIGIBLE"
         and text_upper(row.get("adgroup_status")) == "ELIGIBLE"
-        and text_upper(row.get("keyword_status")) != "ELIGIBLE"
-        and text_upper(row.get("inspect_status")) == "APPROVED"
+        and is_limited_inspect_status(row.get("inspect_status"))
     )
 
 
@@ -190,14 +201,12 @@ def restricted_live_gate(
     if current.get("userLock") is True:
         return False, "keyword_user_locked", current, None, None
 
-    # Narrow first-wave signature: keyword status is not ELIGIBLE, but keyword
-    # inspection is already APPROVED. Pending/rejected inspection is excluded.
-    current_status = text_upper(current.get("status"))
+    # The exposure restriction is carried by inspectStatus 30 /
+    # LIMITED_APPROVED. Do not require ordinary keyword status to be PAUSED:
+    # Naver can keep status ELIGIBLE while inspectStatus represents the limit.
     inspect_status = text_upper(current.get("inspectStatus"))
-    if current_status == "ELIGIBLE":
-        return False, "restriction_cleared", current, None, None
-    if inspect_status != "APPROVED":
-        return False, f"inspect_not_approved:{inspect_status or 'UNKNOWN'}", current, None, None
+    if not is_limited_inspect_status(inspect_status):
+        return False, f"restriction_cleared:{inspect_status or 'UNKNOWN'}", current, None, None
 
     current_tier, tier_reason = keyword_tier(
         adgroup_name=str(adgroup.get("name", "")),
