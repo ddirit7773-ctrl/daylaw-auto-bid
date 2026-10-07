@@ -71,7 +71,11 @@ def main() -> int:
     print(f"Ad group      : {plan.get('adgroup_name', adgroup_id)}")
     print(f"Keyword       : {keyword}")
     print(f"Restored at   : {archive.get('restored_at') or '-'}")
+    print(f"Delete state  : {archive.get('delete_status') or 'DELETED_VERIFIED'}")
 
+    if str(archive.get("delete_status") or "DELETED_VERIFIED") != "DELETED_VERIFIED":
+        print("[SAFE STOP] Only a verified deleted archive can be restored.")
+        return 2
     if archive.get("restored_at"):
         print("[SAFE STOP] This archive has already been marked restored.")
         return 0
