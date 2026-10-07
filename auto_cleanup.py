@@ -105,7 +105,7 @@ def load_policy_and_manual() -> tuple[CleanerPolicy, list[str], list[str]]:
 
 
 def try_keyword_master(
-    client: NaverSearchAdsClient, *, phase: str, max_attempts: int = 2
+    client: NaverSearchAdsClient, *, phase: str, max_attempts: int = 3
 ) -> tuple[set[str], bool]:
     """Fetch an authoritative restriction list, or explicitly disable that lane.
 
@@ -269,6 +269,7 @@ def build_candidate_pool(
     permanent_keywords: list[str],
     type_keywords: list[str],
     reserve_limit: int,
+    master_available: bool,
 ) -> tuple[list[dict[str, str]], dict[str, str]]:
     restricted_ids = {
         str(row.get("keyword_id", ""))
@@ -296,6 +297,12 @@ def build_candidate_pool(
             row.get("status") in {"DELETE_PENDING", "DELETE_APPROVED"}
             and str(row.get("exposure_eligible", "")).lower() == "true"
         ):
+            # When Keyword Master is unavailable, UI-only exposure restriction
+            # flags cannot be authoritatively identified. Keep the ordinary lane
+            # running, but only for keywords at least 90 days old so an unknown
+            # restricted keyword can never pass under a weaker age rule.
+            if not master_available and as_int(row.get("age_days")) < 90:
+                continue
             out = dict(row)
             out["_lane"] = "GENERAL"
             raw_candidates.append(out)
@@ -556,7 +563,11 @@ def run_cleanup(*, live: bool) -> int:
     limited_ids, master_available = try_keyword_master(client, phase="INITIAL")
     print(f"@@AUTO_STAGE|MASTER_DONE|{len(limited_ids)}", flush=True)
     if not master_available:
-        print("[FALLBACK] Restricted lane disabled; ordinary GENERAL lane remains subject to all deletion gates.", flush=True)
+        print(
+            "[FALLBACK] Restricted lane disabled. GENERAL cleanup continues only for "
+            "90-day-or-older rows and remains subject to all 30d/60d/90d deletion gates.",
+            flush=True,
+        )
 
     print("@@AUTO_STAGE|ACCOUNT_SNAPSHOT|0", flush=True)
     snapshot = fetch_account_snapshot(client, label="PRECHECK")
@@ -579,6 +590,7 @@ def run_cleanup(*, live: bool) -> int:
         permanent_keywords=permanent_keywords,
         type_keywords=type_keywords,
         reserve_limit=reserve_limit,
+        master_available=master_available,
     )
     print(f"@@AUTO_STAGE|CANDIDATES|{len(prelim)}|{target}", flush=True)
 
