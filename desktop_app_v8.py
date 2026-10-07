@@ -65,7 +65,13 @@ class DesktopAppV8(DesktopAppV7):
         self.restricted_review_button.pack(side="right", padx=(8, 0))
 
     @staticmethod
-    def _read_csv(path: Path) -> list[dict[str, str]]:
+    def _read_csv(path: Path | None) -> list[dict[str, str]]:
+        # During first launch (or after installing into a fresh folder) there may
+        # be no v2_scan/review CSV yet.  Base versions treat that as an empty
+        # dataset, so v14 must preserve the same contract instead of calling
+        # .open() on None and crashing the whole GUI at startup.
+        if path is None or not path.exists():
+            return []
         try:
             with path.open("r", encoding="utf-8-sig", newline="") as fp:
                 return list(csv.DictReader(fp))
@@ -242,7 +248,7 @@ class DesktopAppV8(DesktopAppV7):
             "첫 단계에서는 GENERAL만 대상으로 하며,\n"
             "• 캠페인/광고그룹 정상\n"
             "• 키워드 자체는 ON\n"
-            "• 키워드 상태는 비노출, 검수는 APPROVED\n"
+            "• 키워드 상태는 노출제한(LIMITED_APPROVED/30)\n"
             "• 등록 90일 이상\n"
             "• 최근 90일 노출 0 / 클릭 0\n"
             "• 보호키워드·TYPE_CORE 제외\n"
