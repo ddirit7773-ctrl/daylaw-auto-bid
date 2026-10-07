@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import csv
 import math
+import time
 from collections import Counter, defaultdict
 from datetime import datetime
 from pathlib import Path
@@ -40,7 +41,7 @@ MANIFEST_FIELDS = [
 ]
 
 SUMMARY_FIELDS = [
-    "started_at", "finished_at", "scan_keywords", "live_keywords_before", "cleanup_stop",
+    "master_initial_status", "master_final_status", "started_at", "finished_at", "scan_keywords", "live_keywords_before", "cleanup_stop",
     "target_removals", "candidate_pool", "bulk_safe_candidates", "final_ready", "deleted",
     "verified", "delete_errors", "verify_failures", "estimated_keywords_after", "stop_reason",
 ]
@@ -101,6 +102,40 @@ def load_policy_and_manual() -> tuple[CleanerPolicy, list[str], list[str]]:
         type_core_suffixes=tuple(dict.fromkeys((*policy.type_core_suffixes, *type_suffixes))),
     )
     return policy, permanent_keywords, type_keywords
+
+
+def try_keyword_master(
+    client: NaverSearchAdsClient, *, phase: str, max_attempts: int = 2
+) -> tuple[set[str], bool]:
+    """Fetch an authoritative restriction list, or explicitly disable that lane.
+
+    The keyword master is not treated as an empty, successfully verified list
+    when the Naver report-download endpoint fails. This distinction ensures
+    that no RESTRICTED deletion uses an unverified/stale report.
+    """
+    for attempt in range(1, max_attempts + 1):
+        try:
+            limited = load_limited_keyword_ids_from_master(client)
+            print(f"@@AUTO_MASTER_STATUS|{phase}|OK|{len(limited)}", flush=True)
+            return limited, True
+        except NaverSearchAdsError as exc:
+            print(
+                f"[MASTER WARNING] {phase} attempt {attempt}/{max_attempts} failed: {exc}",
+                flush=True,
+            )
+            if attempt < max_attempts:
+                print(f"@@AUTO_MASTER_STATUS|{phase}|RETRY|{attempt}", flush=True)
+                time.sleep(3)
+
+    print(f"@@AUTO_MASTER_STATUS|{phase}|SKIP|0", flush=True)
+    print(
+        "[MASTER SAFE HOLD] Keyword exposure restriction could not be verified. "
+        "No exposure-limited keyword will be deleted in this run. "
+        "Only currently eligible GENERAL keywords with complete activity "
+        "revalidation may proceed.",
+        flush=True,
+    )
+    return set(), False
 
 
 def fetch_account_snapshot(client: NaverSearchAdsClient, *, label: str) -> dict[str, object]:
@@ -197,8 +232,19 @@ def candidate_current_ok(
             return False, "restriction_not_in_master"
         if as_int(row.get("age_days")) < 90:
             return False, "restricted_age_under_90d"
-    elif not keyword_exposure_ok(current):
-        return False, "current_exposure_not_eligible"
+    else:
+        # A keyword known to be exposure-limited must NEVER flow through the
+        # ordinary lane, even if the normal keyword API calls it ELIGIBLE.
+        if kid in limited_ids:
+            return False, "restricted_keyword_not_general"
+        managed = current.get("managedKeyword")
+        if isinstance(managed, dict) and managed.get("isRestricted") is True:
+            return False, "managed_keyword_is_restricted"
+        reason = str(current.get("statusReason", "")).strip().upper()
+        if "RESTRICT" in reason or "노출제한" in reason:
+            return False, "keyword_restriction_status"
+        if not keyword_exposure_ok(current):
+            return False, "current_exposure_not_eligible"
 
     return True, "current_state_ok"
 
@@ -238,6 +284,10 @@ def build_candidate_pool(
         if not kid or row.get("tier") != "GENERAL":
             continue
 
+        if kid in limited_ids and kid not in restricted_ids:
+            # Known exposure-limited but not old enough for the restricted
+            # lane. Never reclassify as ordinary GENERAL.
+            continue
         if kid in restricted_ids:
             out = dict(row)
             out["_lane"] = "RESTRICTED"
@@ -503,8 +553,10 @@ def run_cleanup(*, live: bool) -> int:
     client = NaverSearchAdsClient(NaverConfig.from_env(), min_interval_seconds=0.20)
 
     print("@@AUTO_STAGE|MASTER|0", flush=True)
-    limited_ids = load_limited_keyword_ids_from_master(client)
+    limited_ids, master_available = try_keyword_master(client, phase="INITIAL")
     print(f"@@AUTO_STAGE|MASTER_DONE|{len(limited_ids)}", flush=True)
+    if not master_available:
+        print("[FALLBACK] Restricted lane disabled; ordinary GENERAL lane remains subject to all deletion gates.", flush=True)
 
     print("@@AUTO_STAGE|ACCOUNT_SNAPSHOT|0", flush=True)
     snapshot = fetch_account_snapshot(client, label="PRECHECK")
@@ -575,9 +627,15 @@ def run_cleanup(*, live: bool) -> int:
         print("[SAFE STOP] Fresh live count is already at/below cleanup stop.")
         return 0
 
+    final_master_available = master_available
     if any(row.get("_lane") == "RESTRICTED" for row in selected):
         print("@@AUTO_STAGE|FINAL_MASTER|0", flush=True)
-        final_limited_ids = load_limited_keyword_ids_from_master(client)
+        checked_limited_ids, final_master_available = try_keyword_master(
+            client, phase="FINAL"
+        )
+        # Preserve the initial report's restricted IDs as exclusions even if
+        # the final report omits one (status changed) or was unavailable.
+        final_limited_ids = limited_ids | checked_limited_ids
     else:
         final_limited_ids = limited_ids
 
@@ -585,6 +643,12 @@ def run_cleanup(*, live: bool) -> int:
     final_holds: dict[str, str] = {}
     for row in selected:
         lane = str(row.get("_lane", "GENERAL"))
+        if lane == "RESTRICTED" and not final_master_available:
+            final_holds[str(row.get("keyword_id", ""))] = "final_master_unavailable"
+            continue
+        if lane == "RESTRICTED" and str(row.get("keyword_id", "")) not in checked_limited_ids:
+            final_holds[str(row.get("keyword_id", ""))] = "restriction_not_confirmed_in_final_master"
+            continue
         ok, reason = candidate_current_ok(
             row=row,
             lane=lane,
@@ -857,6 +921,8 @@ def run_cleanup(*, live: bool) -> int:
 
     finished_at = datetime.now(KST)
     summary = {
+        "master_initial_status": "OK" if master_available else "SKIPPED",
+        "master_final_status": "OK" if final_master_available else "SKIPPED",
         "started_at": started_at.isoformat(),
         "finished_at": finished_at.isoformat(),
         "scan_keywords": scan_total,
