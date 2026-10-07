@@ -249,13 +249,16 @@ class NaverSearchAdsClient:
         return dict(result or {})
 
     def download_master_report_text(self, download_url: str) -> str:
-        """Download a built Naver master report using the same signed API session."""
+        """Download a built Naver master report using the documented authtoken."""
         parsed = urlparse(str(download_url or ""))
-        uri = parsed.path or "/report-download"
-        if not uri.startswith("/"):
-            uri = "/" + uri
         params = dict(parse_qsl(parsed.query, keep_blank_values=True))
+        authtoken = str(params.get("authtoken", "")).strip()
+        if not authtoken:
+            raise NaverSearchAdsError("Master report download URL has no authtoken.")
+
+        uri = "/report-download"
         url = self.config.base_url + uri
+        request_params = {"authtoken": authtoken}
 
         last_error: Exception | None = None
         for attempt in range(self.max_retries):
@@ -266,7 +269,7 @@ class NaverSearchAdsClient:
                 response = self.session.get(
                     url,
                     headers=self._headers("GET", uri),
-                    params=params,
+                    params=request_params,
                     timeout=self.timeout,
                 )
                 self._last_request_at = time.monotonic()
