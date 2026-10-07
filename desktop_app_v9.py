@@ -465,7 +465,37 @@ class DesktopAppV9(DesktopAppV8):
                 "삭제 완료와 사후검증까지 확인된 항목만 복원할 수 있습니다.",
             )
             return
-        super().restore_selected(live)
+        if row.get("restored_at"):
+            messagebox.showinfo("복원 완료", "이미 복원된 기록입니다.")
+            return
+
+        args = ["--archive-id", archive_id]
+        if live:
+            if not messagebox.askyesno(
+                "실제 복원 확인",
+                f"[{row.get('keyword', '')}] 키워드를 실제로 다시 생성하고 검증합니다.\n계속하시겠습니까?",
+            ):
+                return
+            args.extend(["--restore", "--confirm", "RESTORE"])
+
+        def success() -> None:
+            self.refresh_history()
+            messagebox.showinfo(
+                "복원 완료" if live else "복원 DRY RUN 완료",
+                "키워드 복원과 검증이 완료되었습니다." if live else "복원 가능 여부 확인이 완료되었습니다.",
+            )
+
+        def failure(detail: str) -> None:
+            self.refresh_history()
+            messagebox.showwarning("복원 실패", detail[-1500:] if detail else "복원 작업이 중단되었습니다.")
+
+        self._start_stream_job(
+            command=self.backend_command("restore_deleted_keyword.py", *args),
+            label="키워드 실제 복원" if live else "키워드 복원 DRY RUN",
+            job_kind="generic",
+            on_success=success,
+            on_failure=failure,
+        )
 
     def run_production_cleanup(self) -> None:
         if self.backend_running:
