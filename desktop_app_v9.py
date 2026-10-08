@@ -192,6 +192,39 @@ class DesktopAppV9(DesktopAppV8):
         except (TypeError, ValueError):
             return 0
 
+    def _apply_cleanup_summary_to_dashboard(self) -> None:
+        """Keep headline account totals current immediately after auto cleanup.
+
+        Normally auto_cleanup publishes a filtered post-cleanup scan, so the base
+        dashboard refresh is exact for all status cards. If that snapshot could
+        not be published because another process changed the account
+        concurrently, the verified live counter from the cleanup summary still
+        updates the headline keyword/capacity figures instead of leaving an old
+        pre-delete number on screen.
+        """
+        row = self._latest_auto_summary(min_mtime=self._auto_run_started_wall)
+        if not row:
+            return
+        total = self._num(row.get("estimated_keywords_after"))
+        if total <= 0:
+            return
+        try:
+            policy = CleanerPolicy.load()
+            self.metric_labels["keywords"].configure(text=f"{total:,}")
+            ratio = min(total / max(policy.hard_limit_reference, 1), 1.0)
+            self.capacity_bar.set(ratio)
+            if total >= policy.cleanup_start:
+                target_remove = max(total - policy.cleanup_stop, 0)
+                self.capacity_label.configure(
+                    text=f"{total:,} / {policy.hard_limit_reference:,}  ·  정리 목표 {target_remove:,}개"
+                )
+            else:
+                self.capacity_label.configure(
+                    text=f"{total:,} / {policy.hard_limit_reference:,}  ·  정리 불필요"
+                )
+        except Exception:
+            pass
+
     def _auto_summary_text(self) -> str:
         row = self._latest_auto_summary(min_mtime=self._auto_run_started_wall)
         if not row:
@@ -388,6 +421,26 @@ class DesktopAppV9(DesktopAppV8):
             self.progress_meta.configure(
                 text=f"{pct:.0f}% · 약 {self._fmt_seconds(remaining)} 남음"
             )
+            return
+
+        dashboard_refresh = re.match(
+            r"@@AUTO_DASHBOARD_REFRESH\|([^|]+)\|(\d+)\|(\d+)",
+            text,
+        )
+        if dashboard_refresh:
+            status, shown, expected = dashboard_refresh.groups()
+            if status == "OK":
+                self._set_progress(
+                    99,
+                    f"{label} · 화면 최신화",
+                    f"삭제 후 {int(shown):,}개 기준으로 대시보드/삭제대기 목록을 갱신합니다.",
+                )
+            else:
+                self._set_progress(
+                    99,
+                    f"{label} · 화면 최신화",
+                    f"계정 동시 변경 감지 · 요약의 실시간 카운트 {int(expected):,}개를 표시합니다.",
+                )
             return
 
         checkpoint = re.match(
@@ -600,6 +653,7 @@ class DesktopAppV9(DesktopAppV8):
         def success() -> None:
             self._set_auto_stop_state("disabled")
             self.refresh_dashboard()
+            self._apply_cleanup_summary_to_dashboard()
             self.refresh_delete_queue()
             if hasattr(self, "refresh_history"):
                 self.refresh_history()
@@ -612,6 +666,7 @@ class DesktopAppV9(DesktopAppV8):
         def failure(detail: str) -> None:
             self._set_auto_stop_state("disabled")
             self.refresh_dashboard()
+            self._apply_cleanup_summary_to_dashboard()
             self.refresh_delete_queue()
             if hasattr(self, "refresh_history"):
                 self.refresh_history()
