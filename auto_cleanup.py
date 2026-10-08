@@ -74,6 +74,47 @@ def write_rows(path: Path, rows: list[dict[str, object]], fields: list[str]) -> 
         writer.writerows(rows)
 
 
+def write_post_cleanup_scan(
+    *,
+    scan_rows: list[dict[str, str]],
+    manifest_rows: list[dict[str, object]],
+    stamp: str,
+    expected_total: int,
+) -> Path | None:
+    """Publish a dashboard-ready scan snapshot after verified deletions.
+
+    The classifications of surviving rows come from the full scan performed at
+    the start of this same cleanup run. Only keyword IDs whose DELETE was
+    post-verified as absent are removed. If another process changed account
+    membership concurrently and the resulting row count no longer agrees with
+    our verified live counter, no synthetic scan is published.
+    """
+    verified_ids = {
+        str(row.get("keyword_id", "")).strip()
+        for row in manifest_rows
+        if row.get("verify_result") == "ABSENT_OK" and row.get("keyword_id")
+    }
+    if not verified_ids or not scan_rows:
+        return None
+
+    filtered = [
+        row for row in scan_rows
+        if str(row.get("keyword_id", "")).strip() not in verified_ids
+    ]
+    if len(filtered) != int(expected_total):
+        print(
+            f"@@AUTO_DASHBOARD_REFRESH|SKIP|{len(filtered)}|{int(expected_total)}",
+            flush=True,
+        )
+        return None
+
+    path = BACKUP_DIR / f"v2_scan_postcleanup_{stamp}.csv"
+    fields = list(scan_rows[0].keys())
+    write_rows(path, filtered, fields)
+    print(f"@@AUTO_DASHBOARD_REFRESH|OK|{len(filtered)}|{int(expected_total)}", flush=True)
+    return path
+
+
 def load_lines(path: Path) -> list[str]:
     if not path.exists():
         return []
@@ -930,6 +971,13 @@ def run_cleanup(*, live: bool) -> int:
     finally:
         store.close()
         write_rows(manifest_path, manifest_rows, MANIFEST_FIELDS)
+
+    post_cleanup_scan = write_post_cleanup_scan(
+        scan_rows=scan_rows,
+        manifest_rows=manifest_rows,
+        stamp=stamp,
+        expected_total=final_live_count,
+    )
 
     finished_at = datetime.now(KST)
     summary = {
