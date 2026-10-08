@@ -206,6 +206,41 @@ jobs:
           print("V15 MASTER FALLBACK AGE GATE TEST OK")
           '@ | python -
 
+      - name: Post-cleanup dashboard refresh self test
+        shell: pwsh
+        run: |
+          @'
+          import tempfile
+          from pathlib import Path
+          import auto_cleanup
+
+          with tempfile.TemporaryDirectory() as temp:
+              old_backup = auto_cleanup.BACKUP_DIR
+              auto_cleanup.BACKUP_DIR = Path(temp)
+              try:
+                  scan = [
+                      {"keyword_id": "k1", "status": "DELETE_PENDING"},
+                      {"keyword_id": "k2", "status": "KEEP"},
+                      {"keyword_id": "k3", "status": "DELETE_PENDING"},
+                  ]
+                  manifest = [
+                      {"keyword_id": "k1", "verify_result": "ABSENT_OK"},
+                      {"keyword_id": "k3", "verify_result": "STILL_PRESENT"},
+                  ]
+                  path = auto_cleanup.write_post_cleanup_scan(
+                      scan_rows=scan,
+                      manifest_rows=manifest,
+                      stamp="selftest",
+                      expected_total=2,
+                  )
+                  assert path is not None and path.exists()
+                  rows = auto_cleanup.read_csv(path)
+                  assert [r["keyword_id"] for r in rows] == ["k2", "k3"]
+              finally:
+                  auto_cleanup.BACKUP_DIR = old_backup
+          print("POST-CLEANUP DASHBOARD REFRESH TEST OK")
+          '@ | python -
+
       - name: Pre-delete archive journal self test
         shell: pwsh
         run: |
