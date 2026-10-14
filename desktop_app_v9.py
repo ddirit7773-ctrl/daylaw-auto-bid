@@ -530,7 +530,8 @@ class DesktopAppV9(DesktopAppV8):
         if phase:
             round_name, window, count_s = phase.groups()
             count = int(count_s)
-            self._auto_stats_stage = f"{round_name}:{window}"
+            round_base = round_name.split("_", 1)[0]
+            self._auto_stats_stage = f"{round_base}:{window}"
             try:
                 policy = CleanerPolicy.load()
                 windows = [
@@ -541,13 +542,13 @@ class DesktopAppV9(DesktopAppV8):
                 index = windows.index(window) if window in windows else 0
             except Exception:
                 index = 0
-            if round_name == "PRECHECK":
+            if round_base == "PRECHECK":
                 base = (50, 54, 58)[min(index, 2)]
             else:
                 base = (68, 70, 72)[min(index, 2)]
             self._set_progress(
                 base,
-                f"{label} · {'1차' if round_name == 'PRECHECK' else '최종'} 활동 재검증",
+                f"{label} · {'1차' if round_base == 'PRECHECK' else '최종'} 활동 재검증",
                 f"{count:,}개 후보의 {window} 통계를 안전 고속 조회합니다.",
             )
             return
