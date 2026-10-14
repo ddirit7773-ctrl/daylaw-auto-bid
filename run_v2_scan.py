@@ -517,11 +517,35 @@ def main() -> int:
         + counts["DELETE_PENDING"]
         + counts["DELETE_APPROVED"]
     )
+
+    # Explicit exposure_eligible=False is a known account state, not a failed
+    # read. In particular, exposure-limited keywords are intentionally passed
+    # to the production Keyword-Master lane later. Only genuinely unknown or
+    # incomplete observations are allowed to trip the scan-quality circuit.
+    known_exposure_blocked = sum(
+        count
+        for reason, count in insufficient_reasons.items()
+        if reason == "exposure_eligible=False"
+    )
+    true_incomplete = max(
+        counts["DATA_INSUFFICIENT"] - known_exposure_blocked,
+        0,
+    )
     catastrophic_incomplete = bool(
         total_keywords >= 1000
-        and counts["DATA_INSUFFICIENT"] >= int(total_keywords * 0.50)
+        and true_incomplete >= int(total_keywords * 0.50)
         and actionable <= max(10, int(total_keywords * 0.01))
     )
+    if known_exposure_blocked:
+        print(
+            f"@@SCAN_EXPOSURE_BLOCKED|{known_exposure_blocked}|{total_keywords}",
+            flush=True,
+        )
+        print(
+            f"  Known exposure-blocked rows: {known_exposure_blocked:,} "
+            "(valid state; production restricted lane may inspect them)"
+        )
+
     if catastrophic_incomplete:
         failed_path = path.with_name(path.name.replace("v2_scan_", "scan_failed_"))
         try:
@@ -529,10 +553,10 @@ def main() -> int:
         except OSError:
             failed_path = path
         print(
-            f"@@SCAN_QUALITY_FAIL|{counts['DATA_INSUFFICIENT']}|{total_keywords}|{actionable}",
+            f"@@SCAN_QUALITY_FAIL|{true_incomplete}|{total_keywords}|{actionable}",
             flush=True,
         )
-        print("[SAFE STOP] Scan data quality is abnormal; no deletion may proceed.")
+        print("[SAFE STOP] Scan reads are genuinely incomplete; no deletion may proceed.")
         print(f"Diagnostic CSV          : {failed_path}")
         print("Top DATA_INSUFFICIENT reasons:")
         for reason, count in insufficient_reasons.most_common(8):
