@@ -256,6 +256,14 @@ class DesktopAppV9(DesktopAppV8):
         else:
             master_text = "노출제한 목록: Master 정상 확인 + 직접 API BLOCKED 보조판정"
 
+        diagnostic = str(row.get("exposure_diag_top") or "").strip()
+        diagnostic_text = ""
+        if diagnostic and reason == "no_structural_candidates":
+            parts = [part.strip() for part in diagnostic.split(" || ") if part.strip()]
+            diagnostic_text = "\n\n실제 비노출 API 상태 상위 조합:\n" + "\n".join(
+                f"• {part}" for part in parts[:5]
+            )
+
         return (
             f"실제 삭제 {self._num(row.get('deleted')):,}개\n"
             f"삭제 후 사라짐 확인 {self._num(row.get('verified')):,}개\n"
@@ -264,6 +272,7 @@ class DesktopAppV9(DesktopAppV8):
             f"정리 후 예상 키워드 {self._num(row.get('estimated_keywords_after')):,}개\n"
             f"{master_text}\n"
             f"종료 사유: {stop_map.get(reason, reason or '완료')}"
+            f"{diagnostic_text}"
         )
 
     def _consume_progress_line(self, line: str, label: str, job_kind: str) -> None:
@@ -410,6 +419,17 @@ class DesktopAppV9(DesktopAppV8):
                     "네이버 Keyword Master 일시 오류 · 직접 API의 BLOCKED 상태를 보조판정해 "
                     "90일 무활동 키워드 안전정리를 계속합니다."
                 )
+            )
+            return
+
+        exposure_diag = re.match(
+            r"@@AUTO_EXPOSURE_DIAG\|(\d+)\|(.*)",
+            text,
+        )
+        if exposure_diag:
+            count, shape = exposure_diag.groups()
+            self.progress_detail.configure(
+                text=f"비노출 API 상태 진단 · {int(count):,}개 · {shape}"
             )
             return
 
