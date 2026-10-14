@@ -250,11 +250,11 @@ class DesktopAppV9(DesktopAppV8):
         if initial_master == "NOT_RUN":
             master_text = "노출제한 목록: 해당 단계 전에 작업 종료"
         elif initial_master == "SKIPPED":
-            master_text = "노출제한 목록: 네이버 서버 오류로 이번 실행에서는 전용 후보 보류"
+            master_text = "노출제한 목록: Master 서버 오류 · 직접 API BLOCKED 안전판정 사용"
         elif final_master == "SKIPPED":
-            master_text = "노출제한 목록: 1차 확인 성공 · 최종 확인 실패로 전용 후보 보류"
+            master_text = "노출제한 목록: 최종 Master 확인 실패 · Master 전용 후보만 보류, BLOCKED 라인은 계속"
         else:
-            master_text = "노출제한 목록: 정상 확인"
+            master_text = "노출제한 목록: Master 정상 확인 + 직접 API BLOCKED 보조판정"
 
         return (
             f"실제 삭제 {self._num(row.get('deleted')):,}개\n"
@@ -341,8 +341,8 @@ class DesktopAppV9(DesktopAppV8):
             elif status == "SKIP":
                 self.progress_detail.configure(
                     text=(
-                        f"{phase_ko} 노출제한 목록을 확인하지 못해 해당 전용 삭제는 보류하고 "
-                        "90일 이상 일반 키워드 정리만 계속합니다."
+                        f"{phase_ko} Keyword Master 서버 오류 · Master 전용 후보는 보류하지만 "
+                        "직접 API에서 확인되는 오래된 BLOCKED 키워드는 계속 안전검증합니다."
                     )
                 )
             return
@@ -406,7 +406,25 @@ class DesktopAppV9(DesktopAppV8):
 
         if text.startswith("[MASTER SAFE HOLD]") or text.startswith("[FALLBACK]"):
             self.progress_detail.configure(
-                text="네이버 노출제한 보고서 일시 오류 · 노출제한 전용 후보는 보류하고 일반 안전정리를 계속합니다."
+                text=(
+                    "네이버 Keyword Master 일시 오류 · 직접 API의 BLOCKED 상태를 보조판정해 "
+                    "90일 무활동 키워드 안전정리를 계속합니다."
+                )
+            )
+            return
+
+        blocked_fallback = re.match(
+            r"@@AUTO_BLOCKED_FALLBACK\|(\d+)\|(\d+)\|([^|]+)",
+            text,
+        )
+        if blocked_fallback:
+            blocked, master_ids, master_state = blocked_fallback.groups()
+            self.progress_detail.configure(
+                text=(
+                    f"직접 API BLOCKED 후보 {int(blocked):,}개 · "
+                    f"Master 확인 후보 {int(master_ids):,}개 · "
+                    f"{'Master 정상' if master_state == 'MASTER_OK' else 'Master 서버 오류 fallback'}"
+                )
             )
             return
 
