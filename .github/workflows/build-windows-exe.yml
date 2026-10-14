@@ -473,6 +473,66 @@ jobs:
           print("V17 TARGET SEEKING POLICY TEST OK")
           '@ | python -
 
+      - name: V17 stale paused-group lane self test
+        shell: pwsh
+        run: |
+          @'
+          from auto_cleanup import build_candidate_pool
+          from src.keyword_cleaner.policy_v2 import CleanerPolicy
+
+          policy = CleanerPolicy.load().with_updates(reference_history_days=45)
+          scan = [{
+              "keyword_id": "k-stale",
+              "keyword": "업체오래된일반",
+              "campaign_id": "c1",
+              "campaign_name": "캠",
+              "adgroup_id": "g1",
+              "adgroup_name": "업체",
+              "tier": "GENERAL",
+              "status": "DATA_INSUFFICIENT",
+              "exposure_eligible": "False",
+              "age_days": "120",
+          }]
+          snapshot = {
+              "campaigns": {"c1": {"status": "ELIGIBLE", "userLock": False}},
+              "adgroups": {
+                  "g1": {
+                      "status": "PAUSED",
+                      "userLock": False,
+                      "name": "업체",
+                      "editTm": "2026-01-01T00:00:00+09:00",
+                  }
+              },
+              "keywords": {
+                  "k-stale": {
+                      "nccKeywordId": "k-stale",
+                      "nccAdgroupId": "g1",
+                      "keyword": "업체오래된일반",
+                      "status": "PAUSED",
+                      "inspectStatus": "PENDING",
+                      "userLock": False,
+                      "editTm": "2026-01-01T00:00:00+09:00",
+                  }
+              },
+              "group_keyword_ids": {"g1": ["k-stale", "s1", "s2", "s3", "s4", "s5"]},
+              "total_keywords": 6,
+          }
+          rows, held = build_candidate_pool(
+              scan_rows=scan,
+              snapshot=snapshot,
+              limited_ids=set(),
+              policy=policy,
+              permanent_keywords=[],
+              type_keywords=[],
+              reserve_limit=10,
+              master_available=False,
+              cleanup_mode="aggressive",
+          )
+          assert len(rows) == 1, held
+          assert rows[0]["_lane"] == "PAUSED_GROUP_STALE"
+          print("V17 STALE PAUSED-GROUP TEST OK")
+          '@ | python -
+
       - name: Exposure diagnostic self test
         shell: pwsh
         run: |
