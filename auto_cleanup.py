@@ -778,6 +778,10 @@ def target_seeking_stats_gate(
     cleanup_mode: str,
     phase: str,
     target: int,
+    snapshot: dict[str, object],
+    permanent_keywords: list[str],
+    type_keywords: list[str],
+    limited_ids: set[str],
 ) -> tuple[
     list[dict[str, str]],
     dict[str, str],
@@ -801,9 +805,30 @@ def target_seeking_stats_gate(
             f"{stage_policy.reference_history_days}|{len(remaining)}|{target}",
             flush=True,
         )
+        stage_rows: list[dict[str, str]] = []
+        retry_later: list[dict[str, str]] = []
+        for row in remaining:
+            kid = str(row.get("keyword_id", ""))
+            ok, reason = candidate_current_ok(
+                row=row,
+                lane=str(row.get("_lane", "GENERAL")),
+                snapshot=snapshot,
+                policy=stage_policy,
+                permanent_keywords=permanent_keywords,
+                type_keywords=type_keywords,
+                limited_ids=limited_ids,
+                cleanup_mode=cleanup_mode,
+            )
+            if ok:
+                stage_rows.append(row)
+            else:
+                held[kid] = reason
+                if "age_under_" in reason:
+                    retry_later.append(row)
+
         stage_safe, stage_holds, stage_stats = bulk_stats_gate(
             client=client,
-            rows=remaining,
+            rows=stage_rows,
             policy=stage_policy,
             phase=f"{phase}_S{index}",
         )
@@ -817,8 +842,13 @@ def target_seeking_stats_gate(
             accepted.append(assign_policy_stage(row, stage_name, stage_policy))
             held.pop(str(row.get("keyword_id", "")), None)
 
-        next_remaining: list[dict[str, str]] = []
-        for row in remaining:
+        next_remaining: list[dict[str, str]] = list(retry_later)
+        retry_ids = {
+            str(row.get("keyword_id", ""))
+            for row in retry_later
+            if row.get("keyword_id")
+        }
+        for row in stage_rows:
             kid = str(row.get("keyword_id", ""))
             if kid in safe_ids:
                 continue
@@ -826,7 +856,8 @@ def target_seeking_stats_gate(
             held[kid] = reason
             if reason == "stats_revalidation_incomplete":
                 continue
-            next_remaining.append(row)
+            if kid not in retry_ids:
+                next_remaining.append(row)
         remaining = next_remaining
 
     return accepted, held, stats_map
