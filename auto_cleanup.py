@@ -1211,6 +1211,10 @@ def run_cleanup(*, live: bool, max_delete: int = 0, cleanup_mode: str = "safe") 
         cleanup_mode=cleanup_mode,
         phase="PRECHECK",
         target=target,
+        snapshot=snapshot,
+        permanent_keywords=permanent_keywords,
+        type_keywords=type_keywords,
+        limited_ids=limited_ids,
     )
     holds = {**current_holds, **stat_holds}
     selected = select_target_subset(rows=bulk_safe, snapshot=snapshot, target=target)
