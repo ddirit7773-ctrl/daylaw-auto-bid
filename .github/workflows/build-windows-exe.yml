@@ -241,6 +241,25 @@ jobs:
           print("POST-CLEANUP DASHBOARD REFRESH TEST OK")
           '@ | python -
 
+      - name: InspectStatus numeric compatibility self test
+        shell: pwsh
+        run: |
+          @'
+          from run_v2_scan import _inspect_approved
+          from src.keyword_cleaner.live_safety import keyword_exposure_ok
+
+          assert _inspect_approved("APPROVED") is True
+          assert _inspect_approved(20) is True
+          assert _inspect_approved("20") is True
+          assert _inspect_approved("PENDING") is False
+          assert keyword_exposure_ok({
+              "status": "ELIGIBLE",
+              "inspectStatus": 20,
+              "userLock": False,
+          }) is True
+          print("INSPECT STATUS 20 COMPATIBILITY TEST OK")
+          '@ | python -
+
       - name: Pre-delete archive journal self test
         shell: pwsh
         run: |
