@@ -282,7 +282,7 @@ class DesktopAppV9(DesktopAppV8):
             "scan_data_quality_failed": "네이버 조회 데이터가 비정상적으로 불완전해 삭제 전 안전중단",
             "scan_failed": "전체 스캔 단계 오류로 삭제 전 안전중단",
             "no_structural_candidates": "현재 상태에서 구조 안전조건을 통과한 삭제 후보가 없음",
-            "no_stats_safe_candidates": "30일/60일/90일 활동 재검증을 통과한 후보가 없음",
+            "no_stats_safe_candidates": "설정된 무활동/클릭/전체이력 재검증을 통과한 후보가 없음",
             "no_final_ready_candidates": "삭제 직전 최종 재검증을 통과한 후보가 없음",
         }
         reason = row.get("stop_reason", "")
@@ -305,7 +305,16 @@ class DesktopAppV9(DesktopAppV8):
                 f"• {part}" for part in parts[:5]
             )
 
+        mode_map = {
+            "safe": "안전",
+            "aggressive": "공격적",
+            "very_aggressive": "매우 공격적",
+        }
+        mode_text = mode_map.get(str(row.get("cleanup_mode") or ""), str(row.get("cleanup_mode") or ""))
+        cap = self._num(row.get("max_delete"))
+
         return (
+            f"정리 모드 {mode_text or '-'} · 실행 상한 {cap:,}개\n"
             f"실제 삭제 {self._num(row.get('deleted')):,}개\n"
             f"삭제 후 사라짐 확인 {self._num(row.get('verified')):,}개\n"
             f"삭제 오류 {self._num(row.get('delete_errors')):,}개 · "
@@ -489,19 +498,41 @@ class DesktopAppV9(DesktopAppV8):
             )
             return
 
+        paused_group = re.match(r"@@AUTO_PAUSED_GROUP\|(\d+)\|([^|]+)", text)
+        if paused_group:
+            count, mode = paused_group.groups()
+            if mode == "safe":
+                self.progress_detail.configure(
+                    text="안전 모드 · 중지 광고그룹은 삭제 후보에서 제외합니다."
+                )
+            else:
+                self.progress_detail.configure(
+                    text=(
+                        f"중지 광고그룹의 오래된 GENERAL 후보 {int(count):,}개 확인 · "
+                        "활동이력 0 및 잠금/보호조건을 다시 검증합니다."
+                    )
+                )
+            return
+
         phase = re.match(r"@@AUTO_PHASE\|([^|]+)\|([^|]+)\|(\d+)", text)
         if phase:
             round_name, window, count_s = phase.groups()
             count = int(count_s)
             self._auto_stats_stage = f"{round_name}:{window}"
-            base = {
-                "PRECHECK:30d": 50,
-                "PRECHECK:60d": 54,
-                "PRECHECK:90d": 58,
-                "FINAL:30d": 68,
-                "FINAL:60d": 70,
-                "FINAL:90d": 72,
-            }.get(self._auto_stats_stage, 50)
+            try:
+                policy = CleanerPolicy.load()
+                windows = [
+                    f"{policy.general_inactivity_days}d",
+                    f"{policy.click_protection_days}d",
+                    f"{policy.reference_history_days}d",
+                ]
+                index = windows.index(window) if window in windows else 0
+            except Exception:
+                index = 0
+            if round_name == "PRECHECK":
+                base = (50, 54, 58)[min(index, 2)]
+            else:
+                base = (68, 70, 72)[min(index, 2)]
             self._set_progress(
                 base,
                 f"{label} · {'1차' if round_name == 'PRECHECK' else '최종'} 활동 재검증",
@@ -513,15 +544,19 @@ class DesktopAppV9(DesktopAppV8):
         if stats:
             done = int(stats.group(1))
             total = max(int(stats.group(2)), 1)
-            ranges = {
-                "PRECHECK:30d": (50, 53.5),
-                "PRECHECK:60d": (54, 57.5),
-                "PRECHECK:90d": (58, 62),
-                "FINAL:30d": (68, 69.5),
-                "FINAL:60d": (70, 71.5),
-                "FINAL:90d": (72, 74),
-            }
-            start, end = ranges.get(self._auto_stats_stage, (50, 74))
+            try:
+                policy = CleanerPolicy.load()
+                pre = {
+                    f"PRECHECK:{policy.general_inactivity_days}d": (50, 53.5),
+                    f"PRECHECK:{policy.click_protection_days}d": (54, 57.5),
+                    f"PRECHECK:{policy.reference_history_days}d": (58, 62),
+                    f"FINAL:{policy.general_inactivity_days}d": (68, 69.5),
+                    f"FINAL:{policy.click_protection_days}d": (70, 71.5),
+                    f"FINAL:{policy.reference_history_days}d": (72, 74),
+                }
+                start, end = pre.get(self._auto_stats_stage, (50, 74))
+            except Exception:
+                start, end = (50, 74)
             pct = start + (done / total) * (end - start)
             self._set_progress(
                 pct,
