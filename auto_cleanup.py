@@ -412,7 +412,7 @@ def candidate_current_ok(
         return False, "campaign_not_eligible"
 
     adgroup_status = str(adgroup.get("status", "")).strip().upper()
-    if lane == "PAUSED_GROUP":
+    if lane in {"PAUSED_GROUP", "PAUSED_GROUP_STALE"}:
         if cleanup_mode not in {"aggressive", "very_aggressive"}:
             return False, "paused_group_not_enabled"
         if adgroup_status != "PAUSED":
@@ -461,6 +461,17 @@ def candidate_current_ok(
             return False, "keyword_user_locked"
         if not _inspect_approved(current.get("inspectStatus")):
             return False, "paused_group_keyword_not_approved"
+    elif lane == "PAUSED_GROUP_STALE":
+        stale_age = max(90, policy.reference_history_days * 2)
+        if as_int(row.get("age_days")) < stale_age:
+            return False, f"paused_group_stale_age_under_{stale_age}d"
+        if current.get("userLock") is True:
+            return False, "keyword_user_locked"
+        inspect = str(current.get("inspectStatus", "")).strip().upper()
+        if not inspect:
+            return False, "paused_group_stale_inspect_unknown"
+        if _inspect_approved(inspect):
+            return False, "paused_group_stale_became_approved"
     else:
         # A keyword known to be exposure-limited must NEVER flow through the
         # ordinary lane, even if the normal keyword API calls it ELIGIBLE.
