@@ -425,13 +425,14 @@ def build_exposure_diagnostic(
     scan_rows: list[dict[str, str]],
     snapshot: dict[str, object],
     stamp: str,
+    reference_history_days: int,
 ) -> tuple[Path, list[tuple[str, int]]]:
     """Summarize the real NAVER state shape for old GENERAL exposure-blocked rows."""
     counts: Counter[str] = Counter()
     for row in scan_rows:
         if (
             row.get("tier") != "GENERAL"
-            or as_int(row.get("age_days")) < CleanerPolicy.load().reference_history_days
+            or as_int(row.get("age_days")) < reference_history_days
             or str(row.get("exposure_eligible", "")).lower() != "false"
         ):
             continue
@@ -863,6 +864,8 @@ def run_cleanup(*, live: bool, max_delete: int = 0, cleanup_mode: str = "safe") 
             verify_failures=0,
             estimated_keywords_after=0,
             stop_reason="scan_data_quality_failed" if rc == 6 else "scan_failed",
+            cleanup_mode=cleanup_mode,
+            max_delete=max_delete,
         )
         return rc
 
@@ -871,10 +874,29 @@ def run_cleanup(*, live: bool, max_delete: int = 0, cleanup_mode: str = "safe") 
     scan_total = len(scan_rows)
     print(f"@@AUTO_STAGE|SCAN_DONE|{scan_total}", flush=True)
 
-    if scan_total < policy.cleanup_start:
+    if max_delete <= 0 and scan_total < policy.cleanup_start:
         print(
             f"[SAFE STOP] {scan_total:,} keywords is below cleanup start "
             f"{policy.cleanup_start:,}. Nothing deleted."
+        )
+        write_cleanup_summary(
+            stamp=run_stamp,
+            started_at=started_at,
+            scan_keywords=scan_total,
+            live_keywords_before=scan_total,
+            cleanup_stop=policy.cleanup_stop,
+            target_removals=0,
+            candidate_pool=0,
+            bulk_safe_candidates=0,
+            final_ready=0,
+            deleted=0,
+            verified=0,
+            delete_errors=0,
+            verify_failures=0,
+            estimated_keywords_after=scan_total,
+            stop_reason="below_cleanup_start",
+            cleanup_mode=cleanup_mode,
+            max_delete=max_delete,
         )
         return 0
 
@@ -886,7 +908,7 @@ def run_cleanup(*, live: bool, max_delete: int = 0, cleanup_mode: str = "safe") 
     if not master_available:
         print(
             "[FALLBACK] Keyword Master unavailable. Direct keyword-state BLOCKED lane "
-            "and 90-day-or-older GENERAL safety flow remain available.",
+            "and settings-qualified GENERAL safety flow remain available.",
             flush=True,
         )
 
@@ -900,10 +922,31 @@ def run_cleanup(*, live: bool, max_delete: int = 0, cleanup_mode: str = "safe") 
         scan_rows=scan_rows,
         snapshot=snapshot,
         stamp=run_stamp,
+        reference_history_days=policy.reference_history_days,
     )
 
     if target <= 0:
         print("[SAFE STOP] Live account is already at/below cleanup stop.")
+        write_cleanup_summary(
+            stamp=run_stamp,
+            started_at=started_at,
+            scan_keywords=scan_total,
+            live_keywords_before=live_before,
+            cleanup_stop=policy.cleanup_stop,
+            target_removals=0,
+            candidate_pool=0,
+            bulk_safe_candidates=0,
+            final_ready=0,
+            deleted=0,
+            verified=0,
+            delete_errors=0,
+            verify_failures=0,
+            estimated_keywords_after=live_before,
+            stop_reason="cleanup_stop_reached",
+            master_initial_status="OK" if master_available else "SKIPPED",
+            cleanup_mode=cleanup_mode,
+            max_delete=max_delete,
+        )
         return 0
 
     reserve_limit = min(
@@ -982,7 +1025,7 @@ def run_cleanup(*, live: bool, max_delete: int = 0, cleanup_mode: str = "safe") 
         print("[DRY RUN] Nothing was deleted.")
         return 0
     if not selected:
-        print("[SAFE STOP] No keyword passed the 30d/60d/90d gate.")
+        print("[SAFE STOP] No keyword passed the configured activity-history gates.")
         write_cleanup_summary(
             stamp=run_stamp,
             started_at=started_at,
