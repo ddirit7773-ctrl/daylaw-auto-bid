@@ -266,10 +266,10 @@ def try_keyword_master(
 
     print(f"@@AUTO_MASTER_STATUS|{phase}|SKIP|0", flush=True)
     print(
-        "[MASTER SAFE HOLD] Keyword exposure restriction could not be verified. "
-        "No exposure-limited keyword will be deleted in this run. "
-        "Only currently eligible GENERAL keywords with complete activity "
-        "revalidation may proceed.",
+        "[MASTER SAFE HOLD] Keyword Master could not be verified. "
+        "Master-only restriction rows are held. Direct API BLOCKED rows and "
+        "other mode-eligible GENERAL rows may still proceed through complete "
+        "activity revalidation.",
         flush=True,
     )
     return set(), False
@@ -672,11 +672,11 @@ def bulk_stats_gate(
     click_since, click_until = stats_range(policy.click_protection_days)
     history_since, history_until = stats_range(policy.reference_history_days)
 
-    print(f"@@AUTO_PHASE|{phase}|30d|{len(ids)}", flush=True)
+    print(f"@@AUTO_PHASE|{phase}|{policy.general_inactivity_days}d|{len(ids)}", flush=True)
     recent = get_verified_keyword_stats(client, ids, since=recent_since, until=recent_until)
-    print(f"@@AUTO_PHASE|{phase}|60d|{len(ids)}", flush=True)
+    print(f"@@AUTO_PHASE|{phase}|{policy.click_protection_days}d|{len(ids)}", flush=True)
     clicks = get_verified_keyword_stats(client, ids, since=click_since, until=click_until)
-    print(f"@@AUTO_PHASE|{phase}|90d|{len(ids)}", flush=True)
+    print(f"@@AUTO_PHASE|{phase}|{policy.reference_history_days}d|{len(ids)}", flush=True)
     history = get_verified_keyword_stats(client, ids, since=history_since, until=history_until)
 
     safe: list[dict[str, str]] = []
@@ -700,11 +700,11 @@ def bulk_stats_gate(
         if not r or not c or not h or not r.complete or not c.complete or not h.complete:
             held[kid] = "stats_revalidation_incomplete"
         elif (r.impressions or 0) != 0 or (r.clicks or 0) != 0:
-            held[kid] = "recent_30d_activity_detected"
+            held[kid] = f"recent_{policy.general_inactivity_days}d_activity_detected"
         elif (c.clicks or 0) != 0:
-            held[kid] = "click_within_60d"
+            held[kid] = f"click_within_{policy.click_protection_days}d"
         elif (h.impressions or 0) != 0 or (h.clicks or 0) != 0:
-            held[kid] = "history_within_90d"
+            held[kid] = f"history_within_{policy.reference_history_days}d"
         else:
             safe.append(row)
 
@@ -767,7 +767,7 @@ def make_manifest_rows(
                 "history_clicks": stat[4],
                 "gate_result": "READY" if selected else "HOLD",
                 "gate_reason": (
-                    "bulk_live_gates_passed_30d_60d_90d"
+                    "bulk_live_gates_passed"
                     if selected
                     else held.get(kid, "not_selected_for_target")
                 ),
@@ -1253,7 +1253,11 @@ def run_cleanup(*, live: bool, max_delete: int = 0, cleanup_mode: str = "safe") 
                     "keyword_before_delete": current,
                     "auto_cleanup": {
                         "lane": row.get("_lane", "GENERAL"),
-                        "required_windows": "30d/60d/90d zero",
+                        "required_windows": (
+                            f"{policy.general_inactivity_days}d/"
+                            f"{policy.click_protection_days}d/"
+                            f"{policy.reference_history_days}d zero"
+                        ),
                         "checkpoint_size": DELETE_CHUNK_SIZE,
                         "cleanup_stop": policy.cleanup_stop,
                     },
