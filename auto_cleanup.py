@@ -1173,11 +1173,13 @@ def run_cleanup(*, live: bool, max_delete: int = 0, cleanup_mode: str = "safe") 
         )
         return 0
 
-    bulk_safe, stat_holds, stats_map = bulk_stats_gate(
+    bulk_safe, stat_holds, stats_map = target_seeking_stats_gate(
         client=client,
         rows=prelim,
-        policy=policy,
+        base_policy=policy,
+        cleanup_mode=cleanup_mode,
         phase="PRECHECK",
+        target=target,
     )
     holds = {**current_holds, **stat_holds}
     selected = select_target_subset(rows=bulk_safe, snapshot=snapshot, target=target)
