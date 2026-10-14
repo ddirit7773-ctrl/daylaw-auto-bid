@@ -51,6 +51,26 @@ class DesktopAppV9(DesktopAppV8):
         # may be considered.
         if hasattr(self, "status_text"):
             card = self.status_text.master
+
+            # v16 normal operation is intentionally just the three cleanup
+            # presets. Legacy scan/plan/DRY-RUN buttons remain available in
+            # their dedicated pages, but are hidden from the dashboard so the
+            # operator has one clear workflow.
+            for child in list(card.winfo_children()):
+                try:
+                    text = str(child.cget("text") or "")
+                except Exception:
+                    continue
+                if (
+                    text.startswith("1 · V2")
+                    or text.startswith("2 · 안전 삭제 계획")
+                    or text.startswith("3 · 삭제 실행기")
+                ):
+                    try:
+                        child.pack_forget()
+                    except Exception:
+                        pass
+
             preset = ctk.CTkFrame(card, fg_color="transparent")
             try:
                 preset.pack(fill="x", padx=20, pady=5, before=self.status_text)
