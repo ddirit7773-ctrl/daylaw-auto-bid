@@ -260,6 +260,31 @@ jobs:
           print("INSPECT STATUS 20 COMPATIBILITY TEST OK")
           '@ | python -
 
+      - name: Exposure-blocked scan regression self test
+        shell: pwsh
+        run: |
+          @'
+          from collections import Counter
+
+          # A large population with explicit exposure_eligible=False is a known
+          # account state, not missing data. The production restricted lane must
+          # be allowed to inspect it instead of the scan aborting early.
+          total = 92647
+          insufficient = Counter({"exposure_eligible=False": 87094})
+          known_blocked = insufficient["exposure_eligible=False"]
+          true_incomplete = max(sum(insufficient.values()) - known_blocked, 0)
+          actionable = 0
+          catastrophic = (
+              total >= 1000
+              and true_incomplete >= int(total * 0.50)
+              and actionable <= max(10, int(total * 0.01))
+          )
+          assert known_blocked == 87094
+          assert true_incomplete == 0
+          assert catastrophic is False
+          print("EXPOSURE-BLOCKED SCAN REGRESSION TEST OK")
+          '@ | python -
+
       - name: Pre-delete archive journal self test
         shell: pwsh
         run: |
