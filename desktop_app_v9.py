@@ -738,36 +738,55 @@ class DesktopAppV9(DesktopAppV8):
             on_failure=failure,
         )
 
-    def run_production_cleanup(self) -> None:
+    def run_production_cleanup(
+        self,
+        *,
+        mode: str = "safe",
+        max_delete: int = 5000,
+        mode_label: str = "안전 · 최대 5,000개",
+    ) -> None:
         if self.backend_running:
             messagebox.showinfo("작업 진행 중", "현재 작업이 끝난 뒤 다시 실행해주세요.")
             return
 
         policy = CleanerPolicy.load()
+        paused_group_text = (
+            "제외"
+            if mode == "safe"
+            else "포함 가능 · 단, 사용자 잠금이 아니고 오래된 GENERAL + 활동 0인 경우만"
+        )
+        theoretical = max(
+            min(max_delete, max(self._dashboard_keyword_count() - policy.cleanup_stop, 0)),
+            0,
+        )
+
         if not messagebox.askyesno(
-            "전체 안전 정리",
-            "테스트 모드가 아닌 실제 전체 정리를 시작합니다.\n\n"
-            "프로그램이 자동으로:\n"
-            "• 계정 전체를 새로 스캔\n"
-            "• PERMANENT / TYPE_CORE / 보호키워드 제외\n"
-            "• 일반 무활동 + 노출제한 GENERAL 후보 선별\n"
-            "• 30일/60일/90일 활동을 대량 재검증\n"
-            "• 삭제 직전에 계정 상태와 노출제한 목록을 한 번 더 재검증\n"
-            f"• 계정이 {policy.cleanup_stop:,}개에 도달하면 자동 중단\n\n"
+            f"{mode_label} 실행",
+            f"{mode_label} 모드로 실제 전체 정리를 시작합니다.\n\n"
+            f"이번 실행 최대 삭제량: {max_delete:,}개\n"
+            f"현재 설정상 정리 중단 기준: {policy.cleanup_stop:,}개\n"
+            f"현재 화면 기준 최대 가능량: 약 {theoretical:,}개\n\n"
+            "공통 보호:\n"
+            "• PERMANENT / TYPE_CORE / 수동 보호키워드 제외\n"
+            f"• 일반 무활동 {policy.general_inactivity_days}일 재검증\n"
+            f"• 클릭 보호 {policy.click_protection_days}일 재검증\n"
+            f"• 전체 활동이력 {policy.reference_history_days}일 재검증\n"
+            "• 통계가 불완전하면 삭제 안 함\n"
+            f"• 중지 광고그룹 키워드: {paused_group_text}\n\n"
             "계속하시겠습니까?",
         ):
             return
 
         if not messagebox.askyesno(
             "최종 실제 삭제 확인",
-            "네이버 광고계정의 불필요 키워드를 실제로 삭제합니다.\n\n"
+            "네이버 광고계정의 키워드를 실제로 삭제합니다.\n\n"
             "• 50개 단위 내부 체크포인트\n"
             "• 광고그룹 최대 50% 삭제 / 최소 4개 유지\n"
             "• 모든 DELETE 전에 복원 원본 저장\n"
             "• 각 체크포인트 삭제 후 실제 제거 여부 확인\n"
-            "• 통계/API 확인이 불완전하면 해당 키워드는 삭제하지 않음\n"
-            "• 삭제 오류 3건 또는 사후검증 실패 시 자동 안전중단\n\n"
-            "전체 안전 정리를 실행할까요?",
+            "• 삭제 오류 3건 또는 사후검증 실패 시 자동 안전중단\n"
+            f"• 이번 실행은 최대 {max_delete:,}개까지만 삭제\n\n"
+            "실행할까요?",
         ):
             return
 
@@ -777,6 +796,8 @@ class DesktopAppV9(DesktopAppV8):
         self._set_auto_stop_state("normal")
         self._auto_stats_stage = ""
 
+        job_label = f"{mode_label} 정리"
+
         def success() -> None:
             self._set_auto_stop_state("disabled")
             self.refresh_dashboard()
@@ -785,7 +806,7 @@ class DesktopAppV9(DesktopAppV8):
             if hasattr(self, "refresh_history"):
                 self.refresh_history()
             messagebox.showinfo(
-                "전체 안전 정리 완료",
+                f"{mode_label} 완료",
                 self._auto_summary_text()
                 + "\n\n삭제된 키워드는 '삭제 기록 / 복원'에서 복원 원본을 확인할 수 있습니다.",
             )
@@ -810,7 +831,7 @@ class DesktopAppV9(DesktopAppV8):
                 summary = "이번 실행의 최종 요약이 생성되기 전에 안전중단되었습니다."
                 extra = "\n\n삭제 기록 / 복원에서 실제 삭제 여부를 확인해주세요."
             messagebox.showwarning(
-                "전체 안전 정리 안전중단",
+                f"{mode_label} 안전중단",
                 summary + extra + "\n\n" + (detail[-1000:] if detail else ""),
             )
 
@@ -820,12 +841,23 @@ class DesktopAppV9(DesktopAppV8):
                 "--delete",
                 "--confirm",
                 "AUTO_CLEAN",
+                "--mode",
+                mode,
+                "--max-delete",
+                str(max_delete),
             ),
-            label="전체 안전 정리",
+            label=job_label,
             job_kind="auto_cleanup",
             on_success=success,
             on_failure=failure,
         )
+
+    def _dashboard_keyword_count(self) -> int:
+        try:
+            text = str(self.metric_labels["keywords"].cget("text") or "")
+            return self._num(text.replace(",", ""))
+        except Exception:
+            return 0
 
 
 def main() -> int:
