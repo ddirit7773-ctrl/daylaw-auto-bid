@@ -1261,11 +1261,12 @@ def run_cleanup(*, live: bool, max_delete: int = 0, cleanup_mode: str = "safe") 
         if lane == "RESTRICTED" and str(row.get("keyword_id", "")) not in checked_limited_ids:
             final_holds[str(row.get("keyword_id", ""))] = "restriction_not_confirmed_in_final_master"
             continue
+        row_policy = policy_for_row(policy, row)
         ok, reason = candidate_current_ok(
             row=row,
             lane=lane,
             snapshot=final_snapshot,
-            policy=policy,
+            policy=row_policy,
             permanent_keywords=permanent_keywords,
             type_keywords=type_keywords,
             limited_ids=final_limited_ids,
@@ -1277,10 +1278,10 @@ def run_cleanup(*, live: bool, max_delete: int = 0, cleanup_mode: str = "safe") 
         else:
             final_holds[kid] = reason
 
-    final_safe, final_stat_holds, final_stats_map = bulk_stats_gate(
+    final_safe, final_stat_holds, final_stats_map = assigned_stage_stats_gate(
         client=client,
         rows=structural_ready,
-        policy=policy,
+        base_policy=policy,
         phase="FINAL",
     )
     final_holds.update(final_stat_holds)
