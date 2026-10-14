@@ -238,6 +238,11 @@ class DesktopAppV9(DesktopAppV8):
             "delete_error_limit_reached": "삭제 API 오류가 3건 발생해 안전 중단",
             "post_delete_verification_failed": "삭제 후 확인 실패가 발견되어 안전 중단",
             "user_stop_requested": "사용자 안전 중지 요청으로 종료",
+            "scan_data_quality_failed": "네이버 조회 데이터가 비정상적으로 불완전해 삭제 전 안전중단",
+            "scan_failed": "전체 스캔 단계 오류로 삭제 전 안전중단",
+            "no_structural_candidates": "현재 상태에서 구조 안전조건을 통과한 삭제 후보가 없음",
+            "no_stats_safe_candidates": "30일/60일/90일 활동 재검증을 통과한 후보가 없음",
+            "no_final_ready_candidates": "삭제 직전 최종 재검증을 통과한 후보가 없음",
         }
         reason = row.get("stop_reason", "")
         initial_master = row.get("master_initial_status", "")
@@ -353,6 +358,33 @@ class DesktopAppV9(DesktopAppV8):
             }.get(status, status)
             self.progress_detail.configure(
                 text=f"네이버 키워드 마스터 보고서 {ko} · {int(elapsed):,}초 경과"
+            )
+            return
+
+        quality_fail = re.match(
+            r"@@SCAN_QUALITY_FAIL\|(\d+)\|(\d+)\|(\d+)",
+            text,
+        )
+        if quality_fail:
+            insufficient, total, actionable = map(int, quality_fail.groups())
+            self._set_progress(
+                31,
+                f"{label} · 스캔 데이터 이상 감지",
+                (
+                    f"전체 {total:,}개 중 데이터 부족 {insufficient:,}개 · "
+                    f"판정가능 {actionable:,}개뿐이라 실제 삭제 전 안전중단합니다."
+                ),
+            )
+            return
+
+        stats_retry = re.match(
+            r"@@STATS_RETRY\|ids=(\d+)\|batch_size=(\d+)\|batches=(\d+)",
+            text,
+        )
+        if stats_retry:
+            ids, batch_size, batches = map(int, stats_retry.groups())
+            self.progress_detail.configure(
+                text=f"네이버 통계 실패 {ids:,}개를 {batch_size}개씩 {batches:,}배치로 자동 재조회합니다."
             )
             return
 
