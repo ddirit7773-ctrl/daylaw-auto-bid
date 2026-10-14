@@ -1094,11 +1094,13 @@ def run_cleanup(*, live: bool, max_delete: int = 0, cleanup_mode: str = "safe") 
     target = max(live_before - policy.cleanup_stop, 0)
     if max_delete > 0:
         target = min(target, max_delete)
+    stage_policies = cleanup_stage_policies(policy, cleanup_mode)
+    structural_policy = stage_policies[-1][1]
     exposure_diag_path, exposure_diag_top = build_exposure_diagnostic(
         scan_rows=scan_rows,
         snapshot=snapshot,
         stamp=run_stamp,
-        reference_history_days=policy.reference_history_days,
+        reference_history_days=structural_policy.reference_history_days,
     )
 
     if target <= 0:
@@ -1127,13 +1129,13 @@ def run_cleanup(*, live: bool, max_delete: int = 0, cleanup_mode: str = "safe") 
 
     reserve_limit = min(
         PREVALIDATION_RESERVE,
-        max(target + 3000, math.ceil(target * 1.35)),
+        max(target + 5000, math.ceil(target * 2.5)),
     )
     prelim, current_holds = build_candidate_pool(
         scan_rows=scan_rows,
         snapshot=snapshot,
         limited_ids=limited_ids,
-        policy=policy,
+        policy=structural_policy,
         permanent_keywords=permanent_keywords,
         type_keywords=type_keywords,
         reserve_limit=reserve_limit,
