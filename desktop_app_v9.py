@@ -44,29 +44,62 @@ class DesktopAppV9(DesktopAppV8):
             self._retag_v15(child)
 
     def _add_production_cleanup_buttons(self) -> None:
-        # Dashboard: make the production flow the primary action.
+        # Dashboard: three production presets. The policy settings still define
+        # the actual safety windows; these buttons control how many verified
+        # candidates may be removed in one run and whether old PAUSED adgroups
+        # may be considered.
         if hasattr(self, "status_text"):
             card = self.status_text.master
-            policy = CleanerPolicy.load()
-            self.production_dashboard_button = ctk.CTkButton(
-                card,
-                text=f"전체 안전 정리  ·  스캔부터 {policy.cleanup_stop:,}개까지 자동",
-                height=50,
-                corner_radius=10,
-                fg_color="#B91C1C",
-                hover_color="#991B1B",
-                font=ctk.CTkFont(size=13, weight="bold"),
-                command=self.run_production_cleanup,
-            )
+            preset = ctk.CTkFrame(card, fg_color="transparent")
             try:
-                self.production_dashboard_button.pack(
-                    fill="x",
-                    padx=20,
-                    pady=5,
-                    before=self.status_text,
-                )
+                preset.pack(fill="x", padx=20, pady=5, before=self.status_text)
             except Exception:
-                self.production_dashboard_button.pack(fill="x", padx=20, pady=5)
+                preset.pack(fill="x", padx=20, pady=5)
+
+            for column in range(3):
+                preset.grid_columnconfigure(column, weight=1)
+
+            specs = [
+                (
+                    "안전 · 최대 5,000개",
+                    "safe",
+                    5000,
+                    "#0F766E",
+                    "#115E59",
+                ),
+                (
+                    "공격적 · 최대 10,000개",
+                    "aggressive",
+                    10000,
+                    "#D97706",
+                    "#B45309",
+                ),
+                (
+                    "매우 공격적 · 최대 20,000개",
+                    "very_aggressive",
+                    20000,
+                    "#B91C1C",
+                    "#991B1B",
+                ),
+            ]
+            self.production_dashboard_buttons = []
+            for column, (label, mode, cap, color, hover) in enumerate(specs):
+                button = ctk.CTkButton(
+                    preset,
+                    text=label,
+                    height=48,
+                    corner_radius=10,
+                    fg_color=color,
+                    hover_color=hover,
+                    font=ctk.CTkFont(size=12, weight="bold"),
+                    command=lambda m=mode, n=cap, t=label: self.run_production_cleanup(
+                        mode=m,
+                        max_delete=n,
+                        mode_label=t,
+                    ),
+                )
+                button.grid(row=0, column=column, sticky="ew", padx=4)
+                self.production_dashboard_buttons.append(button)
 
             self.production_dashboard_stop = ctk.CTkButton(
                 card,
@@ -88,13 +121,8 @@ class DesktopAppV9(DesktopAppV8):
             except Exception:
                 self.production_dashboard_stop.pack(fill="x", padx=20, pady=(2, 5))
 
-        # Delete queue: keep the legacy/test controls available, but put one
-        # production button beside them so normal operation is a single action.
         if hasattr(self, "live_delete_button"):
             bar = self.live_delete_button.master
-            # v15 is the production path. Keep legacy functions in code for
-            # recovery/debugging, but remove the old 20-item test controls from
-            # the normal operator screen so there is one obvious delete action.
             for child in list(bar.winfo_children()):
                 try:
                     text = str(child.cget("text") or "")
@@ -112,26 +140,39 @@ class DesktopAppV9(DesktopAppV8):
                     except Exception:
                         pass
 
-            self.production_queue_button = ctk.CTkButton(
-                bar,
-                text="전체 안전 정리",
-                width=145,
-                fg_color="#7F1D1D",
-                hover_color="#991B1B",
-                font=ctk.CTkFont(size=12, weight="bold"),
-                command=self.run_production_cleanup,
-            )
-            self.production_queue_button.pack(side="right", padx=(8, 0))
             self.production_queue_stop = ctk.CTkButton(
                 bar,
                 text="안전 중지",
-                width=100,
+                width=95,
                 fg_color="#475569",
                 hover_color="#334155",
                 state="disabled",
                 command=self._request_auto_stop,
             )
             self.production_queue_stop.pack(side="right", padx=(8, 0))
+
+            queue_specs = [
+                ("5천 안전", "safe", 5000, "#0F766E", "#115E59"),
+                ("1만 공격", "aggressive", 10000, "#D97706", "#B45309"),
+                ("2만 최대", "very_aggressive", 20000, "#B91C1C", "#991B1B"),
+            ]
+            self.production_queue_buttons = []
+            for label, mode, cap, color, hover in queue_specs:
+                button = ctk.CTkButton(
+                    bar,
+                    text=label,
+                    width=92,
+                    fg_color=color,
+                    hover_color=hover,
+                    font=ctk.CTkFont(size=11, weight="bold"),
+                    command=lambda m=mode, n=cap, t=label: self.run_production_cleanup(
+                        mode=m,
+                        max_delete=n,
+                        mode_label=t,
+                    ),
+                )
+                button.pack(side="right", padx=(5, 0))
+                self.production_queue_buttons.append(button)
 
     def _set_auto_stop_state(self, state: str) -> None:
         for name in ("production_dashboard_stop", "production_queue_stop"):
