@@ -241,6 +241,64 @@ def load_policy_and_manual() -> tuple[CleanerPolicy, list[str], list[str]]:
     return policy, permanent_keywords, type_keywords
 
 
+def cleanup_stage_policies(base: CleanerPolicy, cleanup_mode: str) -> list[tuple[str, CleanerPolicy]]:
+    stages: list[tuple[str, CleanerPolicy]] = [("strict", base)]
+
+    def add(name: str, inactivity: int, clicks: int, history: int) -> None:
+        candidate = base.with_updates(
+            general_inactivity_days=min(base.general_inactivity_days, inactivity),
+            click_protection_days=min(base.click_protection_days, clicks),
+            reference_history_days=min(base.reference_history_days, history),
+        )
+        signature = (
+            candidate.general_inactivity_days,
+            candidate.click_protection_days,
+            candidate.reference_history_days,
+        )
+        existing = {
+            (
+                policy.general_inactivity_days,
+                policy.click_protection_days,
+                policy.reference_history_days,
+            )
+            for _, policy in stages
+        }
+        if signature not in existing:
+            stages.append((name, candidate))
+
+    if cleanup_mode in {"aggressive", "very_aggressive"}:
+        add("expand1", 21, 45, 60)
+        add("expand2", 14, 30, 45)
+    if cleanup_mode == "very_aggressive":
+        add("expand3", 7, 21, 30)
+    return stages
+
+
+def policy_for_row(base: CleanerPolicy, row: dict[str, str]) -> CleanerPolicy:
+    return base.with_updates(
+        general_inactivity_days=as_int(
+            row.get("_policy_inactivity_days"), base.general_inactivity_days
+        ),
+        click_protection_days=as_int(
+            row.get("_policy_click_days"), base.click_protection_days
+        ),
+        reference_history_days=as_int(
+            row.get("_policy_history_days"), base.reference_history_days
+        ),
+    )
+
+
+def assign_policy_stage(
+    row: dict[str, str], stage_name: str, policy: CleanerPolicy
+) -> dict[str, str]:
+    out = dict(row)
+    out["_policy_stage"] = stage_name
+    out["_policy_inactivity_days"] = str(policy.general_inactivity_days)
+    out["_policy_click_days"] = str(policy.click_protection_days)
+    out["_policy_history_days"] = str(policy.reference_history_days)
+    return out
+
+
 def try_keyword_master(
     client: NaverSearchAdsClient, *, phase: str, max_attempts: int = 3
 ) -> tuple[set[str], bool]:
