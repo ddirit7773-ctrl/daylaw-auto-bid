@@ -126,7 +126,7 @@ jobs:
           print("PRODUCTION GROUP SAFETY TEST OK")
           '@ | python -
 
-      - name: V15 production safety self test
+      - name: V16 production safety self test
         shell: pwsh
         run: |
           @'
@@ -149,10 +149,10 @@ jobs:
           assert allowance["g10"] == 5
           assert allowance["g5"] == 1
           assert allowance["g4"] == 0
-          print("V15 PRODUCTION SAFETY TEST OK")
+          print("V16 PRODUCTION SAFETY TEST OK")
           '@ | python -
 
-      - name: V15 master-fallback age gate self test
+      - name: V16 master-fallback age gate self test
         shell: pwsh
         run: |
           @'
@@ -203,7 +203,7 @@ jobs:
               master_available=False,
           )
           assert [r["keyword_id"] for r in selected] == ["old"]
-          print("V15 MASTER FALLBACK AGE GATE TEST OK")
+          print("V16 MASTER FALLBACK AGE GATE TEST OK")
           '@ | python -
 
       - name: Post-cleanup dashboard refresh self test
@@ -362,6 +362,95 @@ jobs:
           print("DIRECT BLOCKED FALLBACK TEST OK")
           '@ | python -
 
+      - name: V16 cleanup preset lane self test
+        shell: pwsh
+        run: |
+          @'
+          from auto_cleanup import build_candidate_pool, candidate_current_ok
+          from src.keyword_cleaner.policy_v2 import CleanerPolicy
+
+          policy = CleanerPolicy.load().with_updates(reference_history_days=90)
+          scan = [{
+              "keyword_id": "k-paused",
+              "keyword": "업체일반",
+              "campaign_id": "c1",
+              "campaign_name": "캠",
+              "adgroup_id": "g1",
+              "adgroup_name": "업체",
+              "tier": "GENERAL",
+              "status": "DATA_INSUFFICIENT",
+              "exposure_eligible": "False",
+              "age_days": "180",
+          }]
+          snapshot = {
+              "campaigns": {"c1": {"status": "ELIGIBLE", "userLock": False}},
+              "adgroups": {
+                  "g1": {
+                      "nccAdgroupId": "g1",
+                      "status": "PAUSED",
+                      "userLock": False,
+                      "name": "업체",
+                      "editTm": "2026-01-01T00:00:00+09:00",
+                  }
+              },
+              "keywords": {
+                  "k-paused": {
+                      "nccKeywordId": "k-paused",
+                      "nccAdgroupId": "g1",
+                      "keyword": "업체일반",
+                      "status": "ELIGIBLE",
+                      "inspectStatus": "APPROVED",
+                      "userLock": False,
+                      "editTm": "2026-01-01T00:00:00+09:00",
+                  }
+              },
+              "group_keyword_ids": {
+                  "g1": ["k-paused", "s1", "s2", "s3", "s4", "s5"]
+              },
+              "total_keywords": 6,
+          }
+
+          safe_rows, _ = build_candidate_pool(
+              scan_rows=scan,
+              snapshot=snapshot,
+              limited_ids=set(),
+              policy=policy,
+              permanent_keywords=[],
+              type_keywords=[],
+              reserve_limit=10,
+              master_available=False,
+              cleanup_mode="safe",
+          )
+          assert safe_rows == []
+
+          aggressive_rows, held = build_candidate_pool(
+              scan_rows=scan,
+              snapshot=snapshot,
+              limited_ids=set(),
+              policy=policy,
+              permanent_keywords=[],
+              type_keywords=[],
+              reserve_limit=10,
+              master_available=False,
+              cleanup_mode="aggressive",
+          )
+          assert len(aggressive_rows) == 1, held
+          assert aggressive_rows[0]["_lane"] == "PAUSED_GROUP"
+
+          ok, reason = candidate_current_ok(
+              row=aggressive_rows[0],
+              lane="PAUSED_GROUP",
+              snapshot=snapshot,
+              policy=policy,
+              permanent_keywords=[],
+              type_keywords=[],
+              limited_ids=set(),
+              cleanup_mode="aggressive",
+          )
+          assert ok is True, reason
+          print("V16 CLEANUP PRESET LANE TEST OK")
+          '@ | python -
+
       - name: Exposure diagnostic self test
         shell: pwsh
         run: |
@@ -399,6 +488,7 @@ jobs:
                       scan_rows=scan,
                       snapshot=snapshot,
                       stamp="selftest",
+                      reference_history_days=90,
                   )
                   assert path.exists()
                   assert top and top[0][1] == 1
