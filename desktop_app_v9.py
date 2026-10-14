@@ -17,7 +17,7 @@ from src.keyword_cleaner.policy_v2 import CleanerPolicy
 
 
 class DesktopAppV9(DesktopAppV8):
-    """v15 production shell: one-click full scan and checkpointed safe cleanup."""
+    """v16 production shell: 5k/10k/20k checkpointed cleanup presets."""
 
     def __init__(self) -> None:
         self._auto_stage_started_at = 0.0
@@ -25,7 +25,7 @@ class DesktopAppV9(DesktopAppV8):
         self._auto_stats_stage = ""
         self._auto_run_started_wall = 0.0
         super().__init__()
-        self._retag_v15(self.sidebar)
+        self._retag_v16(self.sidebar)
         self._add_production_cleanup_buttons()
         if hasattr(self, "history_tree"):
             try:
@@ -33,15 +33,16 @@ class DesktopAppV9(DesktopAppV8):
             except Exception:
                 pass
 
-    def _retag_v15(self, widget) -> None:
+    def _retag_v16(self, widget) -> None:
         for child in widget.winfo_children():
             try:
                 text = child.cget("text")
-                if isinstance(text, str) and "v14" in text:
-                    child.configure(text=text.replace("v14", "v15"))
+                if isinstance(text, str):
+                    text = text.replace("v14", "v16").replace("v15", "v16")
+                    child.configure(text=text)
             except Exception:
                 pass
-            self._retag_v15(child)
+            self._retag_v16(child)
 
     def _add_production_cleanup_buttons(self) -> None:
         # Dashboard: three production presets. The policy settings still define
@@ -195,15 +196,6 @@ class DesktopAppV9(DesktopAppV8):
 
     def refresh_dashboard(self) -> None:
         super().refresh_dashboard()
-        button = getattr(self, "production_dashboard_button", None)
-        if button is not None:
-            try:
-                policy = CleanerPolicy.load()
-                button.configure(
-                    text=f"전체 안전 정리  ·  스캔부터 {policy.cleanup_stop:,}개까지 자동"
-                )
-            except Exception:
-                pass
 
     @staticmethod
     def _latest_auto_summary(
@@ -467,7 +459,7 @@ class DesktopAppV9(DesktopAppV8):
             self.progress_detail.configure(
                 text=(
                     "네이버 Keyword Master 일시 오류 · 직접 API의 BLOCKED 상태를 보조판정해 "
-                    "90일 무활동 키워드 안전정리를 계속합니다."
+                    "설정된 전체 활동이력 기준으로 안전정리를 계속합니다."
                 )
             )
             return
