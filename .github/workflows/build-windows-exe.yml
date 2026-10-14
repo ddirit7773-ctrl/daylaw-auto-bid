@@ -451,6 +451,28 @@ jobs:
           print("V16 CLEANUP PRESET LANE TEST OK")
           '@ | python -
 
+      - name: V17 target-seeking policy self test
+        shell: pwsh
+        run: |
+          @'
+          from auto_cleanup import cleanup_stage_policies
+          from src.keyword_cleaner.policy_v2 import CleanerPolicy
+
+          base = CleanerPolicy.load()
+          safe = cleanup_stage_policies(base, "safe")
+          aggressive = cleanup_stage_policies(base, "aggressive")
+          maximum = cleanup_stage_policies(base, "very_aggressive")
+
+          assert len(safe) == 1
+          assert aggressive[-1][1].general_inactivity_days <= 14
+          assert aggressive[-1][1].click_protection_days <= 30
+          assert aggressive[-1][1].reference_history_days <= 45
+          assert maximum[-1][1].general_inactivity_days <= 7
+          assert maximum[-1][1].click_protection_days <= 21
+          assert maximum[-1][1].reference_history_days <= 30
+          print("V17 TARGET SEEKING POLICY TEST OK")
+          '@ | python -
+
       - name: Exposure diagnostic self test
         shell: pwsh
         run: |
