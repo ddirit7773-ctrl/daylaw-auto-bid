@@ -770,6 +770,124 @@ def bulk_stats_gate(
     return safe, held, stats_map
 
 
+def target_seeking_stats_gate(
+    *,
+    client: NaverSearchAdsClient,
+    rows: list[dict[str, str]],
+    base_policy: CleanerPolicy,
+    cleanup_mode: str,
+    phase: str,
+    target: int,
+) -> tuple[
+    list[dict[str, str]],
+    dict[str, str],
+    dict[str, tuple[int | None, int | None, int | None, int | None, int | None]],
+]:
+    stages = cleanup_stage_policies(base_policy, cleanup_mode)
+    remaining = list(rows)
+    accepted: list[dict[str, str]] = []
+    held: dict[str, str] = {}
+    stats_map: dict[
+        str, tuple[int | None, int | None, int | None, int | None, int | None]
+    ] = {}
+
+    for index, (stage_name, stage_policy) in enumerate(stages, start=1):
+        if not remaining or len(accepted) >= target:
+            break
+        print(
+            f"@@AUTO_EXPANSION_STAGE|{phase}|{index}|{stage_name}|"
+            f"{stage_policy.general_inactivity_days}|"
+            f"{stage_policy.click_protection_days}|"
+            f"{stage_policy.reference_history_days}|{len(remaining)}|{target}",
+            flush=True,
+        )
+        stage_safe, stage_holds, stage_stats = bulk_stats_gate(
+            client=client,
+            rows=remaining,
+            policy=stage_policy,
+            phase=f"{phase}_S{index}",
+        )
+        stats_map.update(stage_stats)
+        safe_ids = {
+            str(row.get("keyword_id", ""))
+            for row in stage_safe
+            if row.get("keyword_id")
+        }
+        for row in stage_safe:
+            accepted.append(assign_policy_stage(row, stage_name, stage_policy))
+            held.pop(str(row.get("keyword_id", "")), None)
+
+        next_remaining: list[dict[str, str]] = []
+        for row in remaining:
+            kid = str(row.get("keyword_id", ""))
+            if kid in safe_ids:
+                continue
+            reason = stage_holds.get(kid, "stage_not_passed")
+            held[kid] = reason
+            if reason == "stats_revalidation_incomplete":
+                continue
+            next_remaining.append(row)
+        remaining = next_remaining
+
+    return accepted, held, stats_map
+
+
+def assigned_stage_stats_gate(
+    *,
+    client: NaverSearchAdsClient,
+    rows: list[dict[str, str]],
+    base_policy: CleanerPolicy,
+    phase: str,
+) -> tuple[
+    list[dict[str, str]],
+    dict[str, str],
+    dict[str, tuple[int | None, int | None, int | None, int | None, int | None]],
+]:
+    grouped: dict[tuple[int, int, int], list[dict[str, str]]] = defaultdict(list)
+    for row in rows:
+        row_policy = policy_for_row(base_policy, row)
+        key = (
+            row_policy.general_inactivity_days,
+            row_policy.click_protection_days,
+            row_policy.reference_history_days,
+        )
+        grouped[key].append(row)
+
+    safe_ids: set[str] = set()
+    held: dict[str, str] = {}
+    stats_map: dict[
+        str, tuple[int | None, int | None, int | None, int | None, int | None]
+    ] = {}
+
+    for index, ((inactivity, clicks, history), group_rows) in enumerate(
+        grouped.items(), start=1
+    ):
+        stage_policy = base_policy.with_updates(
+            general_inactivity_days=inactivity,
+            click_protection_days=clicks,
+            reference_history_days=history,
+        )
+        stage_safe, stage_holds, stage_stats = bulk_stats_gate(
+            client=client,
+            rows=group_rows,
+            policy=stage_policy,
+            phase=f"{phase}_S{index}",
+        )
+        safe_ids.update(
+            str(row.get("keyword_id", ""))
+            for row in stage_safe
+            if row.get("keyword_id")
+        )
+        held.update(stage_holds)
+        stats_map.update(stage_stats)
+
+    safe = [
+        row for row in rows
+        if str(row.get("keyword_id", "")) in safe_ids
+    ]
+    return safe, held, stats_map
+
+
 def select_target_subset(
     *, rows: list[dict[str, str]], snapshot: dict[str, object], target: int
 ) -> list[dict[str, str]]:
