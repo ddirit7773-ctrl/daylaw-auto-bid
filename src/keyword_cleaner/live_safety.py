@@ -39,7 +39,8 @@ def exposure_ok(row: dict) -> bool:
 
 
 def keyword_exposure_ok(row: dict) -> bool:
-    return exposure_ok(row) and str(row.get("inspectStatus", "")).strip().upper() == "APPROVED"
+    inspect = str(row.get("inspectStatus", "")).strip().upper()
+    return exposure_ok(row) and inspect in {"APPROVED", "20"}
 
 
 def evaluate_general_delete_gate(
