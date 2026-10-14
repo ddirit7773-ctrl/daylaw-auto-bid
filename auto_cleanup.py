@@ -1420,11 +1420,12 @@ def run_cleanup(*, live: bool, max_delete: int = 0, cleanup_mode: str = "safe") 
             checkpoint_ready: list[dict[str, str]] = []
             for row in chunk:
                 kid = str(row.get("keyword_id", ""))
+                row_policy = policy_for_row(policy, row)
                 ok, reason = candidate_current_ok(
                     row=row,
                     lane=str(row.get("_lane", "GENERAL")),
                     snapshot=checkpoint_snapshot,
-                    policy=policy,
+                    policy=row_policy,
                     permanent_keywords=permanent_keywords,
                     type_keywords=type_keywords,
                     limited_ids=final_limited_ids,
@@ -1472,15 +1473,17 @@ def run_cleanup(*, live: bool, max_delete: int = 0, cleanup_mode: str = "safe") 
                         normalize(str(row.get("keyword", ""))),
                     )
                 )
+                row_policy = policy_for_row(policy, row)
                 payload = {
                     "plan": row,
                     "keyword_before_delete": current,
                     "auto_cleanup": {
                         "lane": row.get("_lane", "GENERAL"),
+                        "policy_stage": row.get("_policy_stage", "strict"),
                         "required_windows": (
-                            f"{policy.general_inactivity_days}d/"
-                            f"{policy.click_protection_days}d/"
-                            f"{policy.reference_history_days}d zero"
+                            f"{row_policy.general_inactivity_days}d/"
+                            f"{row_policy.click_protection_days}d/"
+                            f"{row_policy.reference_history_days}d zero"
                         ),
                         "checkpoint_size": DELETE_CHUNK_SIZE,
                         "cleanup_stop": policy.cleanup_stop,
@@ -1495,7 +1498,7 @@ def run_cleanup(*, live: bool, max_delete: int = 0, cleanup_mode: str = "safe") 
                     keyword=str(row.get("keyword", "")),
                     tier="GENERAL",
                     delete_reason=(
-                        "AUTO_RESTRICTED_90D_ZERO_LIVE_REVALIDATED"
+                        "AUTO_RESTRICTED_STAGED_ZERO_LIVE_REVALIDATED"
                         if row.get("_lane") == "RESTRICTED"
                         else (
                             "AUTO_BLOCKED_APPROVED_HISTORY_ZERO_LIVE_REVALIDATED"
@@ -1503,7 +1506,7 @@ def run_cleanup(*, live: bool, max_delete: int = 0, cleanup_mode: str = "safe") 
                             else (
                                 "AUTO_PAUSED_GROUP_HISTORY_ZERO_LIVE_REVALIDATED"
                                 if row.get("_lane") == "PAUSED_GROUP"
-                                else "AUTO_GENERAL_30D_60D_HISTORY_LIVE_REVALIDATED"
+                                else "AUTO_GENERAL_STAGED_HISTORY_LIVE_REVALIDATED"
                             )
                         )
                     ),
