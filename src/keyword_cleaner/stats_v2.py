@@ -128,6 +128,69 @@ def _error_batch_result(
     }
 
 
+def _retry_incomplete_sequential(
+    client: NaverSearchAdsClient,
+    result: dict[str, VerifiedKeywordStat],
+    *,
+    since: str,
+    until: str,
+    retry_batch_size: int = 20,
+) -> dict[str, VerifiedKeywordStat]:
+    """Second-pass retry for only failed stats IDs using small sequential batches."""
+    failed_ids = [
+        keyword_id
+        for keyword_id, stat in result.items()
+        if not stat.complete
+    ]
+    if not failed_ids:
+        return result
+
+    retry_batch_size = max(1, min(int(retry_batch_size), 20))
+    fields = json.dumps(["impCnt", "clkCnt"], separators=(",", ":"))
+    time_range = json.dumps({"since": since, "until": until}, separators=(",", ":"))
+    retry_batches = _chunks(failed_ids, retry_batch_size)
+    print(
+        f"@@STATS_RETRY|ids={len(failed_ids)}|batch_size={retry_batch_size}|batches={len(retry_batches)}",
+        flush=True,
+    )
+
+    for index, batch in enumerate(retry_batches, start=1):
+        params = {
+            "ids": list(batch),
+            "fields": fields,
+            "timeRange": time_range,
+            "timeIncrement": "allDays",
+        }
+        try:
+            payload = client._request("GET", "/stats", params=params)
+            retried = _materialize_batch_result(batch, payload)
+            for keyword_id, stat in retried.items():
+                result[keyword_id] = VerifiedKeywordStat(
+                    keyword_id=stat.keyword_id,
+                    impressions=stat.impressions,
+                    clicks=stat.clicks,
+                    complete=stat.complete,
+                    source="retry_" + stat.source,
+                    error=stat.error,
+                )
+        except NaverSearchAdsError as exc:
+            for keyword_id in batch:
+                previous = result.get(keyword_id)
+                result[keyword_id] = VerifiedKeywordStat(
+                    keyword_id=keyword_id,
+                    impressions=None,
+                    clicks=None,
+                    complete=False,
+                    source="retry_error",
+                    error=str(exc) if previous is None else f"{previous.error or ''} | retry: {exc}".strip(" |"),
+                )
+        _emit_batch_progress(index, len(retry_batches))
+
+    remaining = sum(1 for stat in result.values() if not stat.complete)
+    print(f"@@STATS_RETRY_DONE|remaining_incomplete={remaining}", flush=True)
+    return result
+
+
 def get_verified_keyword_stats(
     client: NaverSearchAdsClient,
     keyword_ids: Sequence[str],
@@ -183,7 +246,12 @@ def get_verified_keyword_stats(
             except NaverSearchAdsError as exc:
                 result.update(_error_batch_result(batch, exc, source="batch_error"))
             _emit_batch_progress(batch_index, total_batches)
-        return result
+        return _retry_incomplete_sequential(
+            client,
+            result,
+            since=since,
+            until=until,
+        )
 
     worker_local = threading.local()
 
@@ -225,7 +293,12 @@ def get_verified_keyword_stats(
             completed += 1
             _emit_batch_progress(completed, total_batches)
 
-    return result
+    return _retry_incomplete_sequential(
+        client,
+        result,
+        since=since,
+        until=until,
+    )
 
 
 def get_singular_verified_keyword_stat(
