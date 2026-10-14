@@ -115,6 +115,51 @@ def write_post_cleanup_scan(
     return path
 
 
+def write_cleanup_summary(
+    *,
+    stamp: str,
+    started_at: datetime,
+    scan_keywords: int,
+    live_keywords_before: int,
+    cleanup_stop: int,
+    target_removals: int,
+    candidate_pool: int,
+    bulk_safe_candidates: int,
+    final_ready: int,
+    deleted: int,
+    verified: int,
+    delete_errors: int,
+    verify_failures: int,
+    estimated_keywords_after: int,
+    stop_reason: str,
+    master_initial_status: str = "NOT_RUN",
+    master_final_status: str = "NOT_RUN",
+) -> Path:
+    summary = {
+        "master_initial_status": master_initial_status,
+        "master_final_status": master_final_status,
+        "started_at": started_at.isoformat(),
+        "finished_at": datetime.now(KST).isoformat(),
+        "scan_keywords": scan_keywords,
+        "live_keywords_before": live_keywords_before,
+        "cleanup_stop": cleanup_stop,
+        "target_removals": target_removals,
+        "candidate_pool": candidate_pool,
+        "bulk_safe_candidates": bulk_safe_candidates,
+        "final_ready": final_ready,
+        "deleted": deleted,
+        "verified": verified,
+        "delete_errors": delete_errors,
+        "verify_failures": verify_failures,
+        "estimated_keywords_after": estimated_keywords_after,
+        "stop_reason": stop_reason,
+    }
+    path = AUDIT_DIR / f"auto_cleanup_summary_{stamp}.csv"
+    write_rows(path, [summary], SUMMARY_FIELDS)
+    print(f"Summary                 : {path}")
+    return path
+
+
 def load_lines(path: Path) -> list[str]:
     if not path.exists():
         return []
@@ -564,6 +609,7 @@ def verify_chunk(
 
 def run_cleanup(*, live: bool) -> int:
     started_at = datetime.now(KST)
+    run_stamp = datetime.now(KST).strftime("%Y%m%d_%H%M%S")
     load_dotenv()
     policy, permanent_keywords, type_keywords = load_policy_and_manual()
     AUDIT_DIR.mkdir(parents=True, exist_ok=True)
@@ -584,6 +630,23 @@ def run_cleanup(*, live: bool) -> int:
     print("@@AUTO_STAGE|SCAN|0", flush=True)
     rc = int(run_v2_scan.main() or 0)
     if rc != 0:
+        write_cleanup_summary(
+            stamp=run_stamp,
+            started_at=started_at,
+            scan_keywords=0,
+            live_keywords_before=0,
+            cleanup_stop=policy.cleanup_stop,
+            target_removals=0,
+            candidate_pool=0,
+            bulk_safe_candidates=0,
+            final_ready=0,
+            deleted=0,
+            verified=0,
+            delete_errors=0,
+            verify_failures=0,
+            estimated_keywords_after=0,
+            stop_reason="scan_data_quality_failed" if rc == 6 else "scan_failed",
+        )
         return rc
 
     scan_path = latest_scan()
@@ -637,6 +700,25 @@ def run_cleanup(*, live: bool) -> int:
 
     if not prelim:
         print("[SAFE STOP] No current GENERAL candidate passed the structural gate.")
+        write_cleanup_summary(
+            stamp=run_stamp,
+            started_at=started_at,
+            scan_keywords=scan_total,
+            live_keywords_before=live_before,
+            cleanup_stop=policy.cleanup_stop,
+            target_removals=target,
+            candidate_pool=0,
+            bulk_safe_candidates=0,
+            final_ready=0,
+            deleted=0,
+            verified=0,
+            delete_errors=0,
+            verify_failures=0,
+            estimated_keywords_after=live_before,
+            stop_reason="no_structural_candidates",
+            master_initial_status="OK" if master_available else "SKIPPED",
+            master_final_status="NOT_RUN",
+        )
         return 0
 
     bulk_safe, stat_holds, stats_map = bulk_stats_gate(
@@ -670,6 +752,25 @@ def run_cleanup(*, live: bool) -> int:
         return 0
     if not selected:
         print("[SAFE STOP] No keyword passed the 30d/60d/90d gate.")
+        write_cleanup_summary(
+            stamp=run_stamp,
+            started_at=started_at,
+            scan_keywords=scan_total,
+            live_keywords_before=live_before,
+            cleanup_stop=policy.cleanup_stop,
+            target_removals=target,
+            candidate_pool=len(prelim),
+            bulk_safe_candidates=len(bulk_safe),
+            final_ready=0,
+            deleted=0,
+            verified=0,
+            delete_errors=0,
+            verify_failures=0,
+            estimated_keywords_after=live_before,
+            stop_reason="no_stats_safe_candidates",
+            master_initial_status="OK" if master_available else "SKIPPED",
+            master_final_status="NOT_RUN",
+        )
         return 0
 
     print("@@AUTO_STAGE|FINAL_SNAPSHOT|0", flush=True)
@@ -767,6 +868,25 @@ def run_cleanup(*, live: bool) -> int:
 
     if not final_ready:
         print("[SAFE STOP] Final live revalidation produced no READY keyword.")
+        write_cleanup_summary(
+            stamp=run_stamp,
+            started_at=started_at,
+            scan_keywords=scan_total,
+            live_keywords_before=live_before,
+            cleanup_stop=policy.cleanup_stop,
+            target_removals=target,
+            candidate_pool=len(prelim),
+            bulk_safe_candidates=len(bulk_safe),
+            final_ready=0,
+            deleted=0,
+            verified=0,
+            delete_errors=0,
+            verify_failures=0,
+            estimated_keywords_after=final_live_count,
+            stop_reason="no_final_ready_candidates",
+            master_initial_status="OK" if master_available else "SKIPPED",
+            master_final_status="OK" if final_master_available else "SKIPPED",
+        )
         return 0
 
     final_ready.sort(
