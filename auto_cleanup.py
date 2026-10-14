@@ -1274,7 +1274,15 @@ def run_cleanup(*, live: bool, max_delete: int = 0, cleanup_mode: str = "safe") 
         limited_ids=limited_ids,
     )
     holds = {**current_holds, **stat_holds}
-    selected = select_target_subset(rows=bulk_safe, snapshot=snapshot, target=target)
+    validation_buffer = min(
+        len(bulk_safe),
+        target + max(1000, math.ceil(target * 0.50)),
+    )
+    selected = select_target_subset(
+        rows=bulk_safe,
+        snapshot=snapshot,
+        target=validation_buffer,
+    )
     selected_ids = {str(row.get("keyword_id", "")) for row in selected}
 
     manifest_rows = make_manifest_rows(
