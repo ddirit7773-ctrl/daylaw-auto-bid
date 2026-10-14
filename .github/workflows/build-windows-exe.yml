@@ -285,6 +285,83 @@ jobs:
           print("EXPOSURE-BLOCKED SCAN REGRESSION TEST OK")
           '@ | python -
 
+      - name: Direct BLOCKED fallback self test
+        shell: pwsh
+        run: |
+          @'
+          from auto_cleanup import build_candidate_pool, candidate_current_ok
+          from src.keyword_cleaner.policy_v2 import CleanerPolicy
+
+          policy = CleanerPolicy.load()
+          scan = [{
+              "keyword_id": "k-blocked",
+              "keyword": "업체검색",
+              "campaign_id": "c1",
+              "campaign_name": "캠",
+              "adgroup_id": "g1",
+              "adgroup_name": "업체",
+              "tier": "GENERAL",
+              "status": "DATA_INSUFFICIENT",
+              "exposure_eligible": "False",
+              "age_days": "120",
+          }]
+          snapshot = {
+              "campaigns": {"c1": {"status": "ELIGIBLE", "userLock": False}},
+              "adgroups": {"g1": {"status": "ELIGIBLE", "userLock": False, "name": "업체"}},
+              "keywords": {
+                  "k-blocked": {
+                      "nccKeywordId": "k-blocked",
+                      "nccAdgroupId": "g1",
+                      "keyword": "업체검색",
+                      "status": "PAUSED",
+                      "statusReason": "SYSTEM",
+                      "inspectStatus": "APPROVED",
+                      "userLock": False,
+                      "regTm": "2026-01-01T00:00:00+09:00",
+                      "editTm": "2026-01-01T00:00:00+09:00",
+                  }
+              },
+              "group_keyword_ids": {"g1": ["k-blocked", "s1", "s2", "s3", "s4", "s5"]},
+              "total_keywords": 6,
+          }
+          rows, held = build_candidate_pool(
+              scan_rows=scan,
+              snapshot=snapshot,
+              limited_ids=set(),
+              policy=policy,
+              permanent_keywords=[],
+              type_keywords=[],
+              reserve_limit=10,
+              master_available=False,
+          )
+          assert len(rows) == 1, held
+          assert rows[0]["_lane"] == "BLOCKED"
+          ok, reason = candidate_current_ok(
+              row=rows[0],
+              lane="BLOCKED",
+              snapshot=snapshot,
+              policy=policy,
+              permanent_keywords=[],
+              type_keywords=[],
+              limited_ids=set(),
+          )
+          assert ok is True, reason
+
+          snapshot["keywords"]["k-blocked"]["userLock"] = True
+          rows, _ = build_candidate_pool(
+              scan_rows=scan,
+              snapshot=snapshot,
+              limited_ids=set(),
+              policy=policy,
+              permanent_keywords=[],
+              type_keywords=[],
+              reserve_limit=10,
+              master_available=False,
+          )
+          assert rows == []
+          print("DIRECT BLOCKED FALLBACK TEST OK")
+          '@ | python -
+
       - name: Pre-delete archive journal self test
         shell: pwsh
         run: |
