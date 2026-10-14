@@ -247,7 +247,9 @@ class DesktopAppV9(DesktopAppV8):
         reason = row.get("stop_reason", "")
         initial_master = row.get("master_initial_status", "")
         final_master = row.get("master_final_status", "")
-        if initial_master == "SKIPPED":
+        if initial_master == "NOT_RUN":
+            master_text = "노출제한 목록: 해당 단계 전에 작업 종료"
+        elif initial_master == "SKIPPED":
             master_text = "노출제한 목록: 네이버 서버 오류로 이번 실행에서는 전용 후보 보류"
         elif final_master == "SKIPPED":
             master_text = "노출제한 목록: 1차 확인 성공 · 최종 확인 실패로 전용 후보 보류"
@@ -358,6 +360,20 @@ class DesktopAppV9(DesktopAppV8):
             }.get(status, status)
             self.progress_detail.configure(
                 text=f"네이버 키워드 마스터 보고서 {ko} · {int(elapsed):,}초 경과"
+            )
+            return
+
+        exposure_blocked = re.match(
+            r"@@SCAN_EXPOSURE_BLOCKED\|(\d+)\|(\d+)",
+            text,
+        )
+        if exposure_blocked:
+            blocked, total = map(int, exposure_blocked.groups())
+            self.progress_detail.configure(
+                text=(
+                    f"현재 노출불가/노출제한 상태 {blocked:,}개 확인 · 오류가 아니며 "
+                    "다음 단계에서 노출제한 목록과 매칭해 삭제 가능 여부를 계속 판단합니다."
+                )
             )
             return
 
