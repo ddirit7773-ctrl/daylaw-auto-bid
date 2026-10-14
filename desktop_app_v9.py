@@ -296,6 +296,8 @@ class DesktopAppV9(DesktopAppV8):
             "no_structural_candidates": "현재 상태에서 구조 안전조건을 통과한 삭제 후보가 없음",
             "no_stats_safe_candidates": "설정된 무활동/클릭/전체이력 재검증을 통과한 후보가 없음",
             "no_final_ready_candidates": "삭제 직전 최종 재검증을 통과한 후보가 없음",
+            "requested_target_reached": "요청한 정리 목표 수량을 채움",
+            "candidate_exhausted_after_expansion": "보호조건을 지키며 단계 확장했지만 더 이상 안전 후보가 없음",
         }
         reason = row.get("stop_reason", "")
         initial_master = row.get("master_initial_status", "")
@@ -510,6 +512,37 @@ class DesktopAppV9(DesktopAppV8):
             )
             return
 
+        expansion = re.match(
+            r"@@AUTO_EXPANSION_STAGE\|([^|]+)\|(\d+)\|([^|]+)\|(\d+)\|(\d+)\|(\d+)\|(\d+)\|(\d+)",
+            text,
+        )
+        if expansion:
+            phase_name, step, stage_name, inactivity, clicks, history, remaining, target = expansion.groups()
+            phase_ko = "1차" if phase_name.startswith("PRECHECK") else "최종"
+            self.progress_detail.configure(
+                text=(
+                    f"{phase_ko} 목표 채우기 {int(step)}단계 · "
+                    f"무활동 {inactivity}일 / 클릭 {clicks}일 / 전체이력 {history}일 · "
+                    f"재검증 후보 {int(remaining):,}개 · 목표 {int(target):,}개"
+                )
+            )
+            return
+
+        stale_paused = re.match(
+            r"@@AUTO_STALE_PAUSED_GROUP\|(\d+)\|([^|]+)",
+            text,
+        )
+        if stale_paused:
+            count, mode = stale_paused.groups()
+            if mode != "safe":
+                self.progress_detail.configure(
+                    text=(
+                        f"오래된 중지 광고그룹의 미승인 GENERAL 후보 {int(count):,}개 확인 · "
+                        "장기 무활동인 항목부터 후순위 정리 후보로 사용합니다."
+                    )
+                )
+            return
+
         paused_group = re.match(r"@@AUTO_PAUSED_GROUP\|(\d+)\|([^|]+)", text)
         if paused_group:
             count, mode = paused_group.groups()
@@ -567,9 +600,14 @@ class DesktopAppV9(DesktopAppV8):
                     f"FINAL:{policy.click_protection_days}d": (70, 71.5),
                     f"FINAL:{policy.reference_history_days}d": (72, 74),
                 }
-                start, end = pre.get(self._auto_stats_stage, (50, 74))
+                if self._auto_stats_stage in pre:
+                    start, end = pre[self._auto_stats_stage]
+                elif self._auto_stats_stage.startswith("PRECHECK:"):
+                    start, end = (50, 62)
+                else:
+                    start, end = (68, 74)
             except Exception:
-                start, end = (50, 74)
+                start, end = (50, 62) if self._auto_stats_stage.startswith("PRECHECK:") else (68, 74)
             pct = start + (done / total) * (end - start)
             self._set_progress(
                 pct,
