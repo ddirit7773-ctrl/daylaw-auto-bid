@@ -44,6 +44,7 @@ SUMMARY_FIELDS = [
     "master_initial_status", "master_final_status", "started_at", "finished_at", "scan_keywords", "live_keywords_before", "cleanup_stop",
     "target_removals", "candidate_pool", "bulk_safe_candidates", "final_ready", "deleted",
     "verified", "delete_errors", "verify_failures", "estimated_keywords_after", "stop_reason",
+    "exposure_diag_top", "exposure_diag_path",
 ]
 
 
@@ -134,6 +135,8 @@ def write_cleanup_summary(
     stop_reason: str,
     master_initial_status: str = "NOT_RUN",
     master_final_status: str = "NOT_RUN",
+    exposure_diag_top: str = "",
+    exposure_diag_path: str = "",
 ) -> Path:
     summary = {
         "master_initial_status": master_initial_status,
@@ -153,6 +156,8 @@ def write_cleanup_summary(
         "verify_failures": verify_failures,
         "estimated_keywords_after": estimated_keywords_after,
         "stop_reason": stop_reason,
+        "exposure_diag_top": exposure_diag_top,
+        "exposure_diag_path": exposure_diag_path,
     }
     path = AUDIT_DIR / f"auto_cleanup_summary_{stamp}.csv"
     write_rows(path, [summary], SUMMARY_FIELDS)
@@ -378,6 +383,58 @@ def candidate_current_ok(
             return False, "current_exposure_not_eligible"
 
     return True, "current_state_ok"
+
+
+def build_exposure_diagnostic(
+    *,
+    scan_rows: list[dict[str, str]],
+    snapshot: dict[str, object],
+    stamp: str,
+) -> tuple[Path, list[tuple[str, int]]]:
+    """Summarize the real NAVER state shape for old GENERAL exposure-blocked rows."""
+    counts: Counter[str] = Counter()
+    for row in scan_rows:
+        if (
+            row.get("tier") != "GENERAL"
+            or as_int(row.get("age_days")) < 90
+            or str(row.get("exposure_eligible", "")).lower() != "false"
+        ):
+            continue
+
+        kid = str(row.get("keyword_id", "")).strip()
+        current = snapshot["keywords"].get(kid, {})  # type: ignore[index]
+        campaign = snapshot["campaigns"].get(str(row.get("campaign_id", "")), {})  # type: ignore[index]
+        adgroup = snapshot["adgroups"].get(str(row.get("adgroup_id", "")), {})  # type: ignore[index]
+        managed = current.get("managedKeyword")
+        managed_restricted = (
+            managed.get("isRestricted")
+            if isinstance(managed, dict)
+            else None
+        )
+        key = "|".join(
+            [
+                f"campaign={str(campaign.get('status', '')).strip() or 'EMPTY'}",
+                f"adgroup={str(adgroup.get('status', '')).strip() or 'EMPTY'}",
+                f"keyword={str(current.get('status', '')).strip() or 'EMPTY'}",
+                f"inspect={str(current.get('inspectStatus', '')).strip() or 'EMPTY'}",
+                f"reason={str(current.get('statusReason', '')).strip() or 'EMPTY'}",
+                f"userLock={current.get('userLock')}",
+                f"isRestricted={managed_restricted}",
+            ]
+        )
+        counts[key] += 1
+
+    rows = [
+        {"count": count, "state_shape": shape}
+        for shape, count in counts.most_common()
+    ]
+    path = AUDIT_DIR / f"exposure_state_diagnostic_{stamp}.csv"
+    write_rows(path, rows, ["count", "state_shape"])
+    top = counts.most_common(8)
+    print(f"@@AUTO_EXPOSURE_DIAG_FILE|{path}", flush=True)
+    for shape, count in top:
+        print(f"@@AUTO_EXPOSURE_DIAG|{count}|{shape}", flush=True)
+    return path, top
 
 
 def group_allowances(snapshot: dict[str, object]) -> dict[str, int]:
@@ -759,6 +816,11 @@ def run_cleanup(*, live: bool) -> int:
     snapshot = fetch_account_snapshot(client, label="PRECHECK")
     live_before = int(snapshot["total_keywords"])
     target = max(live_before - policy.cleanup_stop, 0)
+    exposure_diag_path, exposure_diag_top = build_exposure_diagnostic(
+        scan_rows=scan_rows,
+        snapshot=snapshot,
+        stamp=run_stamp,
+    )
 
     if target <= 0:
         print("[SAFE STOP] Live account is already at/below cleanup stop.")
@@ -800,6 +862,10 @@ def run_cleanup(*, live: bool) -> int:
             stop_reason="no_structural_candidates",
             master_initial_status="OK" if master_available else "SKIPPED",
             master_final_status="NOT_RUN",
+            exposure_diag_top=" || ".join(
+                f"{count:,}개:{shape}" for shape, count in exposure_diag_top[:5]
+            ),
+            exposure_diag_path=str(exposure_diag_path),
         )
         return 0
 
@@ -1204,6 +1270,10 @@ def run_cleanup(*, live: bool) -> int:
         "verify_failures": verify_failures,
         "estimated_keywords_after": final_live_count,
         "stop_reason": stop_reason,
+        "exposure_diag_top": " || ".join(
+            f"{count:,}개:{shape}" for shape, count in exposure_diag_top[:5]
+        ),
+        "exposure_diag_path": str(exposure_diag_path),
     }
     summary_path = AUDIT_DIR / f"auto_cleanup_summary_{stamp}.csv"
     write_rows(summary_path, [summary], SUMMARY_FIELDS)
