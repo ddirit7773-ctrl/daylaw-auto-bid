@@ -177,6 +177,42 @@ def as_int(value: object, default: int = 0) -> int:
         return default
 
 
+def _inspect_approved(value: object) -> bool:
+    return str(value or "").strip().upper() in {"APPROVED", "20"}
+
+
+def _timestamp_age_days(value: object) -> int | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    if text.endswith("Z"):
+        text = text[:-1] + "+00:00"
+    try:
+        parsed = datetime.fromisoformat(text)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=KST)
+    return max((datetime.now(KST).date() - parsed.astimezone(KST).date()).days, 0)
+
+
+def _live_keyword_blocked_approved(keyword: dict) -> bool:
+    """Conservative direct-API fallback for a keyword-level system block.
+
+    Parent campaign/adgroup health is checked separately. A row qualifies here
+    only when the keyword itself is not currently ELIGIBLE, inspection is
+    already APPROVED(20), and the operator did not user-lock it. This matches
+    the stable "중지: 키워드 노출 제한" shape without relying on undocumented
+    statusReason strings or the flaky Keyword Master download.
+    """
+    if keyword.get("userLock") is True:
+        return False
+    status = str(keyword.get("status", "")).strip().upper()
+    if not status or status == "ELIGIBLE":
+        return False
+    return _inspect_approved(keyword.get("inspectStatus"))
+
+
 def load_policy_and_manual() -> tuple[CleanerPolicy, list[str], list[str]]:
     policy = CleanerPolicy.load()
     permanent_keywords = load_lines(Path("config/protected_keywords.txt"))
@@ -311,6 +347,10 @@ def candidate_current_ok(
     if tier != "GENERAL":
         return False, f"tier_changed:{tier}:{tier_reason}"
 
+    edit_age = _timestamp_age_days(current.get("editTm"))
+    if edit_age is not None and edit_age < policy.general_protection_days:
+        return False, f"recent_edit_protection:{edit_age}d"
+
     if lane == "RESTRICTED":
         if current.get("userLock") is True:
             return False, "keyword_user_locked"
@@ -318,6 +358,11 @@ def candidate_current_ok(
             return False, "restriction_not_in_master"
         if as_int(row.get("age_days")) < 90:
             return False, "restricted_age_under_90d"
+    elif lane == "BLOCKED":
+        if as_int(row.get("age_days")) < 90:
+            return False, "blocked_age_under_90d"
+        if not _live_keyword_blocked_approved(current):
+            return False, "blocked_state_not_confirmed"
     else:
         # A keyword known to be exposure-limited must NEVER flow through the
         # ordinary lane, even if the normal keyword API calls it ELIGIBLE.
@@ -365,6 +410,39 @@ def build_candidate_pool(
         and str(row.get("keyword_id", "")) in limited_ids
     }
 
+    # Direct keyword-API fallback/supplement. This deliberately does NOT accept
+    # every exposure_eligible=False row. It only accepts an old GENERAL keyword
+    # whose parents are healthy and whose own status is non-ELIGIBLE while
+    # inspectStatus is already APPROVED(20). User-locked rows never qualify.
+    blocked_ids: set[str] = set()
+    for row in scan_rows:
+        kid = str(row.get("keyword_id", "")).strip()
+        if (
+            not kid
+            or row.get("tier") != "GENERAL"
+            or as_int(row.get("age_days")) < 90
+            or kid in restricted_ids
+        ):
+            continue
+        current = snapshot["keywords"].get(kid)  # type: ignore[index]
+        campaign = snapshot["campaigns"].get(str(row.get("campaign_id", "")))  # type: ignore[index]
+        adgroup = snapshot["adgroups"].get(str(row.get("adgroup_id", "")))  # type: ignore[index]
+        if (
+            current
+            and campaign
+            and adgroup
+            and exposure_ok(campaign)
+            and exposure_ok(adgroup)
+            and _live_keyword_blocked_approved(current)
+        ):
+            blocked_ids.add(kid)
+
+    print(
+        f"@@AUTO_BLOCKED_FALLBACK|{len(blocked_ids)}|{len(restricted_ids)}|"
+        f"{'MASTER_OK' if master_available else 'MASTER_UNAVAILABLE'}",
+        flush=True,
+    )
+
     raw_candidates: list[dict[str, str]] = []
     for row in scan_rows:
         kid = str(row.get("keyword_id", ""))
@@ -378,6 +456,10 @@ def build_candidate_pool(
         if kid in restricted_ids:
             out = dict(row)
             out["_lane"] = "RESTRICTED"
+            raw_candidates.append(out)
+        elif kid in blocked_ids:
+            out = dict(row)
+            out["_lane"] = "BLOCKED"
             raw_candidates.append(out)
         elif (
             row.get("status") in {"DELETE_PENDING", "DELETE_APPROVED"}
@@ -395,7 +477,7 @@ def build_candidate_pool(
 
     raw_candidates.sort(
         key=lambda row: (
-            0 if row.get("_lane") == "RESTRICTED" else 1,
+            0 if row.get("_lane") in {"RESTRICTED", "BLOCKED"} else 1,
             0 if row.get("status") == "DELETE_APPROVED" else 1,
             -as_int(row.get("age_days")),
             row.get("campaign_name", ""),
@@ -668,8 +750,8 @@ def run_cleanup(*, live: bool) -> int:
     print(f"@@AUTO_STAGE|MASTER_DONE|{len(limited_ids)}", flush=True)
     if not master_available:
         print(
-            "[FALLBACK] Restricted lane disabled. GENERAL cleanup continues only for "
-            "90-day-or-older rows and remains subject to all 30d/60d/90d deletion gates.",
+            "[FALLBACK] Keyword Master unavailable. Direct keyword-state BLOCKED lane "
+            "and 90-day-or-older GENERAL safety flow remain available.",
             flush=True,
         )
 
@@ -1030,7 +1112,11 @@ def run_cleanup(*, live: bool) -> int:
                     delete_reason=(
                         "AUTO_RESTRICTED_90D_ZERO_LIVE_REVALIDATED"
                         if row.get("_lane") == "RESTRICTED"
-                        else "AUTO_GENERAL_30D_60D_90D_LIVE_REVALIDATED"
+                        else (
+                            "AUTO_BLOCKED_APPROVED_90D_ZERO_LIVE_REVALIDATED"
+                            if row.get("_lane") == "BLOCKED"
+                            else "AUTO_GENERAL_30D_60D_90D_LIVE_REVALIDATED"
+                        )
                     ),
                     payload=payload,
                 )
