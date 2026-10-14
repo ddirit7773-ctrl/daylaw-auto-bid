@@ -327,8 +327,10 @@ class DesktopAppV9(DesktopAppV8):
         mode_text = mode_map.get(str(row.get("cleanup_mode") or ""), str(row.get("cleanup_mode") or ""))
         cap = self._num(row.get("max_delete"))
 
+        run_target = self._num(row.get("target_removals"))
         return (
-            f"정리 모드 {mode_text or '-'} · 실행 상한 {cap:,}개\n"
+            f"정리 모드 {mode_text or '-'} · 버튼 목표 {cap:,}개\n"
+            f"하한선 반영 이번 목표 {run_target:,}개\n"
             f"실제 삭제 {self._num(row.get('deleted')):,}개\n"
             f"삭제 후 사라짐 확인 {self._num(row.get('verified')):,}개\n"
             f"삭제 오류 {self._num(row.get('delete_errors')):,}개 · "
