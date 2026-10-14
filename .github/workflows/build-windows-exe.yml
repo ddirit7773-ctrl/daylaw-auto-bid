@@ -362,6 +362,54 @@ jobs:
           print("DIRECT BLOCKED FALLBACK TEST OK")
           '@ | python -
 
+      - name: Exposure diagnostic self test
+        shell: pwsh
+        run: |
+          @'
+          import tempfile
+          from pathlib import Path
+          import auto_cleanup
+
+          scan = [{
+              "keyword_id": "k1",
+              "campaign_id": "c1",
+              "adgroup_id": "g1",
+              "tier": "GENERAL",
+              "age_days": "120",
+              "exposure_eligible": "False",
+          }]
+          snapshot = {
+              "campaigns": {"c1": {"status": "ELIGIBLE"}},
+              "adgroups": {"g1": {"status": "ELIGIBLE"}},
+              "keywords": {
+                  "k1": {
+                      "status": "PAUSED",
+                      "inspectStatus": "APPROVED",
+                      "statusReason": "SOME_REASON",
+                      "userLock": False,
+                      "managedKeyword": {"isRestricted": True},
+                  }
+              },
+          }
+          with tempfile.TemporaryDirectory() as temp:
+              old_audit = auto_cleanup.AUDIT_DIR
+              auto_cleanup.AUDIT_DIR = Path(temp)
+              try:
+                  path, top = auto_cleanup.build_exposure_diagnostic(
+                      scan_rows=scan,
+                      snapshot=snapshot,
+                      stamp="selftest",
+                  )
+                  assert path.exists()
+                  assert top and top[0][1] == 1
+                  assert "keyword=PAUSED" in top[0][0]
+                  assert "inspect=APPROVED" in top[0][0]
+                  assert "isRestricted=True" in top[0][0]
+              finally:
+                  auto_cleanup.AUDIT_DIR = old_audit
+          print("EXPOSURE DIAGNOSTIC TEST OK")
+          '@ | python -
+
       - name: Pre-delete archive journal self test
         shell: pwsh
         run: |
