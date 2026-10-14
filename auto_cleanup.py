@@ -44,7 +44,7 @@ SUMMARY_FIELDS = [
     "master_initial_status", "master_final_status", "started_at", "finished_at", "scan_keywords", "live_keywords_before", "cleanup_stop",
     "target_removals", "candidate_pool", "bulk_safe_candidates", "final_ready", "deleted",
     "verified", "delete_errors", "verify_failures", "estimated_keywords_after", "stop_reason",
-    "exposure_diag_top", "exposure_diag_path",
+    "exposure_diag_top", "exposure_diag_path", "cleanup_mode", "max_delete",
 ]
 
 
@@ -52,6 +52,12 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Production one-click safe keyword cleanup.")
     parser.add_argument("--delete", action="store_true")
     parser.add_argument("--confirm", default="")
+    parser.add_argument("--max-delete", type=int, default=0)
+    parser.add_argument(
+        "--mode",
+        choices=("safe", "aggressive", "very_aggressive"),
+        default="safe",
+    )
     return parser.parse_args()
 
 
@@ -137,6 +143,8 @@ def write_cleanup_summary(
     master_final_status: str = "NOT_RUN",
     exposure_diag_top: str = "",
     exposure_diag_path: str = "",
+    cleanup_mode: str = "safe",
+    max_delete: int = 0,
 ) -> Path:
     summary = {
         "master_initial_status": master_initial_status,
@@ -158,6 +166,8 @@ def write_cleanup_summary(
         "stop_reason": stop_reason,
         "exposure_diag_top": exposure_diag_top,
         "exposure_diag_path": exposure_diag_path,
+        "cleanup_mode": cleanup_mode,
+        "max_delete": max_delete,
     }
     path = AUDIT_DIR / f"auto_cleanup_summary_{stamp}.csv"
     write_rows(path, [summary], SUMMARY_FIELDS)
@@ -322,6 +332,7 @@ def candidate_current_ok(
     permanent_keywords: list[str],
     type_keywords: list[str],
     limited_ids: set[str],
+    cleanup_mode: str = "safe",
 ) -> tuple[bool, str]:
     kid = str(row.get("keyword_id", "")).strip()
     current = snapshot["keywords"].get(kid)  # type: ignore[index]
@@ -339,8 +350,25 @@ def candidate_current_ok(
     adgroup = snapshot["adgroups"].get(gid)  # type: ignore[index]
     if not campaign or not adgroup:
         return False, "parent_missing"
-    if not exposure_ok(campaign) or not exposure_ok(adgroup):
-        return False, "parent_not_eligible"
+    if not exposure_ok(campaign):
+        return False, "campaign_not_eligible"
+
+    adgroup_status = str(adgroup.get("status", "")).strip().upper()
+    if lane == "PAUSED_GROUP":
+        if cleanup_mode not in {"aggressive", "very_aggressive"}:
+            return False, "paused_group_not_enabled"
+        if adgroup_status != "PAUSED":
+            return False, f"paused_group_state_changed:{adgroup_status or 'UNKNOWN'}"
+        if adgroup.get("userLock") is True:
+            return False, "paused_group_user_locked"
+        adgroup_edit_age = _timestamp_age_days(adgroup.get("editTm"))
+        if (
+            adgroup_edit_age is not None
+            and adgroup_edit_age < policy.general_protection_days
+        ):
+            return False, f"paused_group_recent_edit:{adgroup_edit_age}d"
+    elif not exposure_ok(adgroup):
+        return False, "adgroup_not_eligible"
 
     tier, tier_reason = keyword_tier(
         adgroup_name=str(adgroup.get("name", "")),
@@ -361,13 +389,20 @@ def candidate_current_ok(
             return False, "keyword_user_locked"
         if kid not in limited_ids:
             return False, "restriction_not_in_master"
-        if as_int(row.get("age_days")) < 90:
-            return False, "restricted_age_under_90d"
+        if as_int(row.get("age_days")) < policy.reference_history_days:
+            return False, f"restricted_age_under_{policy.reference_history_days}d"
     elif lane == "BLOCKED":
-        if as_int(row.get("age_days")) < 90:
-            return False, "blocked_age_under_90d"
+        if as_int(row.get("age_days")) < policy.reference_history_days:
+            return False, f"blocked_age_under_{policy.reference_history_days}d"
         if not _live_keyword_blocked_approved(current):
             return False, "blocked_state_not_confirmed"
+    elif lane == "PAUSED_GROUP":
+        if as_int(row.get("age_days")) < policy.reference_history_days:
+            return False, f"paused_group_age_under_{policy.reference_history_days}d"
+        if current.get("userLock") is True:
+            return False, "keyword_user_locked"
+        if not _inspect_approved(current.get("inspectStatus")):
+            return False, "paused_group_keyword_not_approved"
     else:
         # A keyword known to be exposure-limited must NEVER flow through the
         # ordinary lane, even if the normal keyword API calls it ELIGIBLE.
@@ -396,7 +431,7 @@ def build_exposure_diagnostic(
     for row in scan_rows:
         if (
             row.get("tier") != "GENERAL"
-            or as_int(row.get("age_days")) < 90
+            or as_int(row.get("age_days")) < CleanerPolicy.load().reference_history_days
             or str(row.get("exposure_eligible", "")).lower() != "false"
         ):
             continue
@@ -458,12 +493,13 @@ def build_candidate_pool(
     type_keywords: list[str],
     reserve_limit: int,
     master_available: bool,
+    cleanup_mode: str = "safe",
 ) -> tuple[list[dict[str, str]], dict[str, str]]:
     restricted_ids = {
         str(row.get("keyword_id", ""))
         for row in scan_rows
         if row.get("tier") == "GENERAL"
-        and as_int(row.get("age_days")) >= 90
+        and as_int(row.get("age_days")) >= policy.reference_history_days
         and str(row.get("keyword_id", "")) in limited_ids
     }
 
@@ -477,7 +513,7 @@ def build_candidate_pool(
         if (
             not kid
             or row.get("tier") != "GENERAL"
-            or as_int(row.get("age_days")) < 90
+            or as_int(row.get("age_days")) < policy.reference_history_days
             or kid in restricted_ids
         ):
             continue
@@ -500,6 +536,38 @@ def build_candidate_pool(
         flush=True,
     )
 
+    paused_group_ids: set[str] = set()
+    if cleanup_mode in {"aggressive", "very_aggressive"}:
+        for row in scan_rows:
+            kid = str(row.get("keyword_id", "")).strip()
+            if (
+                not kid
+                or row.get("tier") != "GENERAL"
+                or as_int(row.get("age_days")) < policy.reference_history_days
+                or kid in restricted_ids
+                or kid in blocked_ids
+            ):
+                continue
+            current = snapshot["keywords"].get(kid)  # type: ignore[index]
+            campaign = snapshot["campaigns"].get(str(row.get("campaign_id", "")))  # type: ignore[index]
+            adgroup = snapshot["adgroups"].get(str(row.get("adgroup_id", "")))  # type: ignore[index]
+            if (
+                current
+                and campaign
+                and adgroup
+                and exposure_ok(campaign)
+                and str(adgroup.get("status", "")).strip().upper() == "PAUSED"
+                and adgroup.get("userLock") is not True
+                and current.get("userLock") is not True
+                and _inspect_approved(current.get("inspectStatus"))
+            ):
+                paused_group_ids.add(kid)
+
+    print(
+        f"@@AUTO_PAUSED_GROUP|{len(paused_group_ids)}|{cleanup_mode}",
+        flush=True,
+    )
+
     raw_candidates: list[dict[str, str]] = []
     for row in scan_rows:
         kid = str(row.get("keyword_id", ""))
@@ -518,6 +586,10 @@ def build_candidate_pool(
             out = dict(row)
             out["_lane"] = "BLOCKED"
             raw_candidates.append(out)
+        elif kid in paused_group_ids:
+            out = dict(row)
+            out["_lane"] = "PAUSED_GROUP"
+            raw_candidates.append(out)
         elif (
             row.get("status") in {"DELETE_PENDING", "DELETE_APPROVED"}
             and str(row.get("exposure_eligible", "")).lower() == "true"
@@ -526,7 +598,10 @@ def build_candidate_pool(
             # flags cannot be authoritatively identified. Keep the ordinary lane
             # running, but only for keywords at least 90 days old so an unknown
             # restricted keyword can never pass under a weaker age rule.
-            if not master_available and as_int(row.get("age_days")) < 90:
+            if (
+                not master_available
+                and as_int(row.get("age_days")) < policy.reference_history_days
+            ):
                 continue
             out = dict(row)
             out["_lane"] = "GENERAL"
@@ -534,7 +609,7 @@ def build_candidate_pool(
 
     raw_candidates.sort(
         key=lambda row: (
-            0 if row.get("_lane") in {"RESTRICTED", "BLOCKED"} else 1,
+            0 if row.get("_lane") in {"RESTRICTED", "BLOCKED", "PAUSED_GROUP"} else 1,
             0 if row.get("status") == "DELETE_APPROVED" else 1,
             -as_int(row.get("age_days")),
             row.get("campaign_name", ""),
@@ -559,6 +634,7 @@ def build_candidate_pool(
             permanent_keywords=permanent_keywords,
             type_keywords=type_keywords,
             limited_ids=limited_ids,
+            cleanup_mode=cleanup_mode,
         )
         if not ok:
             held[kid] = reason
@@ -746,7 +822,7 @@ def verify_chunk(
     return verified, failures
 
 
-def run_cleanup(*, live: bool) -> int:
+def run_cleanup(*, live: bool, max_delete: int = 0, cleanup_mode: str = "safe") -> int:
     started_at = datetime.now(KST)
     run_stamp = datetime.now(KST).strftime("%Y%m%d_%H%M%S")
     load_dotenv()
@@ -765,6 +841,8 @@ def run_cleanup(*, live: bool) -> int:
     print(f"Cleanup start           : {policy.cleanup_start:,}")
     print(f"Cleanup stop            : {policy.cleanup_stop:,}")
     print(f"Checkpoint size         : {DELETE_CHUNK_SIZE:,}")
+    print(f"Cleanup mode            : {cleanup_mode}")
+    print(f"Run delete cap          : {max_delete:,}" if max_delete > 0 else "Run delete cap          : policy target")
 
     print("@@AUTO_STAGE|SCAN|0", flush=True)
     rc = int(run_v2_scan.main() or 0)
@@ -816,6 +894,8 @@ def run_cleanup(*, live: bool) -> int:
     snapshot = fetch_account_snapshot(client, label="PRECHECK")
     live_before = int(snapshot["total_keywords"])
     target = max(live_before - policy.cleanup_stop, 0)
+    if max_delete > 0:
+        target = min(target, max_delete)
     exposure_diag_path, exposure_diag_top = build_exposure_diagnostic(
         scan_rows=scan_rows,
         snapshot=snapshot,
@@ -839,6 +919,7 @@ def run_cleanup(*, live: bool) -> int:
         type_keywords=type_keywords,
         reserve_limit=reserve_limit,
         master_available=master_available,
+        cleanup_mode=cleanup_mode,
     )
     print(f"@@AUTO_STAGE|CANDIDATES|{len(prelim)}|{target}", flush=True)
 
@@ -866,6 +947,8 @@ def run_cleanup(*, live: bool) -> int:
                 f"{count:,}개:{shape}" for shape, count in exposure_diag_top[:5]
             ),
             exposure_diag_path=str(exposure_diag_path),
+            cleanup_mode=cleanup_mode,
+            max_delete=max_delete,
         )
         return 0
 
@@ -918,6 +1001,8 @@ def run_cleanup(*, live: bool) -> int:
             stop_reason="no_stats_safe_candidates",
             master_initial_status="OK" if master_available else "SKIPPED",
             master_final_status="NOT_RUN",
+            cleanup_mode=cleanup_mode,
+            max_delete=max_delete,
         )
         return 0
 
@@ -925,6 +1010,8 @@ def run_cleanup(*, live: bool) -> int:
     final_snapshot = fetch_account_snapshot(client, label="FINAL")
     final_live_count = int(final_snapshot["total_keywords"])
     final_target = max(final_live_count - policy.cleanup_stop, 0)
+    if max_delete > 0:
+        final_target = min(final_target, max_delete)
     if final_target <= 0:
         print("[SAFE STOP] Fresh live count is already at/below cleanup stop.")
         return 0
@@ -959,6 +1046,7 @@ def run_cleanup(*, live: bool) -> int:
             permanent_keywords=permanent_keywords,
             type_keywords=type_keywords,
             limited_ids=final_limited_ids,
+            cleanup_mode=cleanup_mode,
         )
         kid = str(row.get("keyword_id", ""))
         if ok:
@@ -1034,12 +1122,14 @@ def run_cleanup(*, live: bool) -> int:
             stop_reason="no_final_ready_candidates",
             master_initial_status="OK" if master_available else "SKIPPED",
             master_final_status="OK" if final_master_available else "SKIPPED",
+            cleanup_mode=cleanup_mode,
+            max_delete=max_delete,
         )
         return 0
 
     final_ready.sort(
         key=lambda row: (
-            0 if row.get("_lane") == "RESTRICTED" else 1,
+            0 if row.get("_lane") in {"RESTRICTED", "BLOCKED", "PAUSED_GROUP"} else 1,
             row.get("adgroup_id", ""),
             -as_int(row.get("age_days")),
             row.get("keyword", ""),
@@ -1114,6 +1204,7 @@ def run_cleanup(*, live: bool) -> int:
                     permanent_keywords=permanent_keywords,
                     type_keywords=type_keywords,
                     limited_ids=final_limited_ids,
+                    cleanup_mode=cleanup_mode,
                 )
                 if ok:
                     checkpoint_ready.append(row)
@@ -1179,9 +1270,13 @@ def run_cleanup(*, live: bool) -> int:
                         "AUTO_RESTRICTED_90D_ZERO_LIVE_REVALIDATED"
                         if row.get("_lane") == "RESTRICTED"
                         else (
-                            "AUTO_BLOCKED_APPROVED_90D_ZERO_LIVE_REVALIDATED"
+                            "AUTO_BLOCKED_APPROVED_HISTORY_ZERO_LIVE_REVALIDATED"
                             if row.get("_lane") == "BLOCKED"
-                            else "AUTO_GENERAL_30D_60D_90D_LIVE_REVALIDATED"
+                            else (
+                                "AUTO_PAUSED_GROUP_HISTORY_ZERO_LIVE_REVALIDATED"
+                                if row.get("_lane") == "PAUSED_GROUP"
+                                else "AUTO_GENERAL_30D_60D_HISTORY_LIVE_REVALIDATED"
+                            )
                         )
                     ),
                     payload=payload,
@@ -1274,6 +1369,8 @@ def run_cleanup(*, live: bool) -> int:
             f"{count:,}개:{shape}" for shape, count in exposure_diag_top[:5]
         ),
         "exposure_diag_path": str(exposure_diag_path),
+        "cleanup_mode": cleanup_mode,
+        "max_delete": max_delete,
     }
     summary_path = AUDIT_DIR / f"auto_cleanup_summary_{stamp}.csv"
     write_rows(summary_path, [summary], SUMMARY_FIELDS)
@@ -1301,7 +1398,12 @@ def main() -> int:
     live = bool(args.delete)
     if live and args.confirm != "AUTO_CLEAN":
         raise SystemExit("Live auto cleanup requires --delete --confirm AUTO_CLEAN")
-    return run_cleanup(live=live)
+    max_delete = max(int(args.max_delete or 0), 0)
+    return run_cleanup(
+        live=live,
+        max_delete=max_delete,
+        cleanup_mode=str(args.mode or "safe"),
+    )
 
 
 if __name__ == "__main__":
