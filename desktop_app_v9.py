@@ -17,7 +17,7 @@ from src.keyword_cleaner.policy_v2 import CleanerPolicy
 
 
 class DesktopAppV9(DesktopAppV8):
-    """v16 production shell: 5k/10k/20k checkpointed cleanup presets."""
+    """v17 production shell: target-seeking cleanup presets."""
 
     def __init__(self) -> None:
         self._auto_stage_started_at = 0.0
@@ -25,7 +25,7 @@ class DesktopAppV9(DesktopAppV8):
         self._auto_stats_stage = ""
         self._auto_run_started_wall = 0.0
         super().__init__()
-        self._retag_v16(self.sidebar)
+        self._retag_v17(self.sidebar)
         self._add_production_cleanup_buttons()
         if hasattr(self, "history_tree"):
             try:
@@ -33,16 +33,16 @@ class DesktopAppV9(DesktopAppV8):
             except Exception:
                 pass
 
-    def _retag_v16(self, widget) -> None:
+    def _retag_v17(self, widget) -> None:
         for child in widget.winfo_children():
             try:
                 text = child.cget("text")
                 if isinstance(text, str):
-                    text = text.replace("v14", "v16").replace("v15", "v16")
+                    text = text.replace("v14", "v17").replace("v15", "v17").replace("v16", "v17")
                     child.configure(text=text)
             except Exception:
                 pass
-            self._retag_v16(child)
+            self._retag_v17(child)
 
     def _add_production_cleanup_buttons(self) -> None:
         # Dashboard: three production presets. The policy settings still define
