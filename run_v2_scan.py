@@ -511,6 +511,33 @@ def main() -> int:
     insufficient_reasons = Counter(
         row["reason"] for row in output if row["status"] == "DATA_INSUFFICIENT"
     )
+    actionable = (
+        counts["KEEP"]
+        + counts["WATCH"]
+        + counts["DELETE_PENDING"]
+        + counts["DELETE_APPROVED"]
+    )
+    catastrophic_incomplete = bool(
+        total_keywords >= 1000
+        and counts["DATA_INSUFFICIENT"] >= int(total_keywords * 0.50)
+        and actionable <= max(10, int(total_keywords * 0.01))
+    )
+    if catastrophic_incomplete:
+        failed_path = path.with_name(path.name.replace("v2_scan_", "scan_failed_"))
+        try:
+            path.replace(failed_path)
+        except OSError:
+            failed_path = path
+        print(
+            f"@@SCAN_QUALITY_FAIL|{counts['DATA_INSUFFICIENT']}|{total_keywords}|{actionable}",
+            flush=True,
+        )
+        print("[SAFE STOP] Scan data quality is abnormal; no deletion may proceed.")
+        print(f"Diagnostic CSV          : {failed_path}")
+        print("Top DATA_INSUFFICIENT reasons:")
+        for reason, count in insufficient_reasons.most_common(8):
+            print(f"  {reason}: {count:,}")
+        return 6
 
     print("[6/6] Complete")
     print("")
