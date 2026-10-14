@@ -1443,11 +1443,20 @@ def run_cleanup(*, live: bool, max_delete: int = 0, cleanup_mode: str = "safe") 
         )
         return 0
 
+    stage_priority = {"strict": 0, "expand1": 1, "expand2": 2, "expand3": 3}
+    lane_priority = {
+        "RESTRICTED": 0,
+        "BLOCKED": 0,
+        "PAUSED_GROUP_STALE": 1,
+        "PAUSED_GROUP": 2,
+        "GENERAL": 3,
+    }
     final_ready.sort(
         key=lambda row: (
-            0 if row.get("_lane") in {"RESTRICTED", "BLOCKED", "PAUSED_GROUP"} else 1,
-            row.get("adgroup_id", ""),
+            stage_priority.get(str(row.get("_policy_stage", "strict")), 9),
+            lane_priority.get(str(row.get("_lane", "GENERAL")), 9),
             -as_int(row.get("age_days")),
+            row.get("adgroup_id", ""),
             row.get("keyword", ""),
         )
     )
