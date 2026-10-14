@@ -110,6 +110,12 @@ def _status_text(row: dict) -> str:
     return str(row.get("status", "")).strip().upper()
 
 
+def _inspect_approved(value: object) -> bool:
+    # NAVER's InspectStatus enum is APPROVED(20). Depending on the endpoint/
+    # serializer the API may expose either the enum label or its numeric value.
+    return str(value or "").strip().upper() in {"APPROVED", "20"}
+
+
 def _exposure_eligible(campaign: dict, adgroup: dict, keyword: dict) -> bool | None:
     """Conservative tri-state exposure eligibility.
 
@@ -126,10 +132,10 @@ def _exposure_eligible(campaign: dict, adgroup: dict, keyword: dict) -> bool | N
         if status != "ELIGIBLE":
             return False
 
-    inspect = str(keyword.get("inspectStatus", "")).strip().upper()
-    if not inspect:
+    inspect = keyword.get("inspectStatus")
+    if inspect is None or str(inspect).strip() == "":
         return None
-    if inspect != "APPROVED":
+    if not _inspect_approved(inspect):
         return False
     return True
 
@@ -502,6 +508,9 @@ def main() -> int:
     path = _write_csv(output)
     counts = Counter(row["status"] for row in output)
     tiers = Counter(row["tier"] for row in output)
+    insufficient_reasons = Counter(
+        row["reason"] for row in output if row["status"] == "DATA_INSUFFICIENT"
+    )
 
     print("[6/6] Complete")
     print("")
@@ -513,6 +522,11 @@ def main() -> int:
     print(f"  DATA_INSUFFICIENT : {counts['DATA_INSUFFICIENT']:,}")
     print(f"  DELETE_PENDING    : {counts['DELETE_PENDING']:,}")
     print(f"  DELETE_APPROVED   : {counts['DELETE_APPROVED']:,}")
+    if insufficient_reasons:
+        print("")
+        print("  DATA_INSUFFICIENT reasons:")
+        for reason, count in insufficient_reasons.most_common(8):
+            print(f"    {reason}: {count:,}")
     print("")
     print(f"  TIER PERMANENT    : {tiers['PERMANENT']:,}")
     print(f"  TIER TYPE_CORE    : {tiers['TYPE_CORE']:,}")
