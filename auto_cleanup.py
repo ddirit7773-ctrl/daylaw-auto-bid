@@ -633,8 +633,43 @@ def build_candidate_pool(
             ):
                 paused_group_ids.add(kid)
 
+    stale_paused_group_ids: set[str] = set()
+    if cleanup_mode in {"aggressive", "very_aggressive"}:
+        stale_age_floor = max(90, policy.reference_history_days * 2)
+        for row in scan_rows:
+            kid = str(row.get("keyword_id", "")).strip()
+            if (
+                not kid
+                or row.get("tier") != "GENERAL"
+                or as_int(row.get("age_days")) < stale_age_floor
+                or kid in restricted_ids
+                or kid in blocked_ids
+                or kid in paused_group_ids
+            ):
+                continue
+            current = snapshot["keywords"].get(kid)  # type: ignore[index]
+            campaign = snapshot["campaigns"].get(str(row.get("campaign_id", "")))  # type: ignore[index]
+            adgroup = snapshot["adgroups"].get(str(row.get("adgroup_id", "")))  # type: ignore[index]
+            inspect = str((current or {}).get("inspectStatus", "")).strip().upper()
+            if (
+                current
+                and campaign
+                and adgroup
+                and exposure_ok(campaign)
+                and str(adgroup.get("status", "")).strip().upper() == "PAUSED"
+                and adgroup.get("userLock") is not True
+                and current.get("userLock") is not True
+                and inspect
+                and not _inspect_approved(inspect)
+            ):
+                stale_paused_group_ids.add(kid)
+
     print(
         f"@@AUTO_PAUSED_GROUP|{len(paused_group_ids)}|{cleanup_mode}",
+        flush=True,
+    )
+    print(
+        f"@@AUTO_STALE_PAUSED_GROUP|{len(stale_paused_group_ids)}|{cleanup_mode}",
         flush=True,
     )
 
@@ -660,6 +695,10 @@ def build_candidate_pool(
             out = dict(row)
             out["_lane"] = "PAUSED_GROUP"
             raw_candidates.append(out)
+        elif kid in stale_paused_group_ids:
+            out = dict(row)
+            out["_lane"] = "PAUSED_GROUP_STALE"
+            raw_candidates.append(out)
         elif (
             row.get("status") in {"DELETE_PENDING", "DELETE_APPROVED"}
             and str(row.get("exposure_eligible", "")).lower() == "true"
@@ -677,9 +716,16 @@ def build_candidate_pool(
             out["_lane"] = "GENERAL"
             raw_candidates.append(out)
 
+    lane_priority = {
+        "RESTRICTED": 0,
+        "BLOCKED": 0,
+        "PAUSED_GROUP_STALE": 1,
+        "PAUSED_GROUP": 2,
+        "GENERAL": 3,
+    }
     raw_candidates.sort(
         key=lambda row: (
-            0 if row.get("_lane") in {"RESTRICTED", "BLOCKED", "PAUSED_GROUP"} else 1,
+            lane_priority.get(str(row.get("_lane", "GENERAL")), 9),
             0 if row.get("status") == "DELETE_APPROVED" else 1,
             -as_int(row.get("age_days")),
             row.get("campaign_name", ""),
