@@ -1675,6 +1675,10 @@ def run_cleanup(*, live: bool, max_delete: int = 0, cleanup_mode: str = "safe") 
 
         if final_live_count <= policy.cleanup_stop:
             stop_reason = "cleanup_stop_reached"
+        elif deleted >= final_target and final_target > 0:
+            stop_reason = "requested_target_reached"
+        elif deleted < final_target:
+            stop_reason = "candidate_exhausted_after_expansion"
     finally:
         store.close()
         write_rows(manifest_path, manifest_rows, MANIFEST_FIELDS)
